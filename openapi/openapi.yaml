@@ -1,0 +1,543 @@
+openapi: 3.1.0
+info:
+  title: PiPGM API
+  version: 1.0.0
+  description: PiPGM pipelines, library items and stage page, split from pimatrix. Canva routes come in 1.1.
+servers:
+  - url: http://127.0.0.1:3100
+tags:
+  - name: System
+  - name: Pipelines
+  - name: Items
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [System]
+      responses:
+        "200":
+          description: Process is running
+  /pipgm/{pipelineId}/stage:
+    get:
+      operationId: getStagePage
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      responses:
+        "200":
+          description: Stage page (HTML)
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/pipelines:
+    get:
+      operationId: listPipelines
+      tags: [Pipelines]
+      parameters:
+        - in: query
+          name: includeHidden
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: All pipelines
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/pipelines/{pipelineId}:
+    get:
+      operationId: getPipeline
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      responses:
+        "200":
+          description: Pipeline snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/pipelines/{pipelineId}/config:
+    put:
+      operationId: updatePipelineConfig
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orientation:
+                  type: string
+                  enum: [landscape, portrait]
+                hidden:
+                  type: boolean
+                linked:
+                  type: boolean
+                fadeDurationMs:
+                  type: number
+                  minimum: 0
+                  maximum: 10000
+      responses:
+        "200":
+          description: Updated pipeline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/pipelines/{pipelineId}/control:
+    post:
+      operationId: controlPipeline
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [next, prev, gotoStep, gotoItem, play, pause, stop, restart]
+                stepIndex:
+                  type: integer
+                  minimum: 0
+                itemId:
+                  type: string
+                itemIndex:
+                  type: integer
+                  minimum: 0
+                advanceItemOnEnd:
+                  type: boolean
+                sync:
+                  type: boolean
+      responses:
+        "200":
+          description: Pipeline after the action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/pipelines/{pipelineId}/ftb:
+    post:
+      operationId: setFadeToBlack
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fadeToBlack:
+                  type: boolean
+                toggle:
+                  type: boolean
+                durationMs:
+                  type: number
+                  minimum: 0
+                  maximum: 10000
+                sync:
+                  type: boolean
+      responses:
+        "200":
+          description: Pipeline after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/pipelines/{pipelineId}/audio:
+    post:
+      operationId: setPipelineAudio
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                audioEnabled:
+                  type: boolean
+                toggle:
+                  type: boolean
+                volume:
+                  type: number
+                  minimum: 0
+                  maximum: 100
+                sync:
+                  type: boolean
+      responses:
+        "200":
+          description: Pipeline after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/pipelines/{pipelineId}/playlist:
+    post:
+      operationId: addPlaylistItem
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [itemId]
+              properties:
+                itemId:
+                  type: string
+                cueImmediately:
+                  type: boolean
+      responses:
+        "200":
+          description: Pipeline with the item added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/pipelines/{pipelineId}/playlist/{itemId}:
+    delete:
+      operationId: removePlaylistItem
+      tags: [Pipelines]
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+        - in: path
+          name: itemId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pipeline with the item removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/items:
+    get:
+      operationId: listItems
+      tags: [Items]
+      responses:
+        "200":
+          description: Library items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Item"
+  /api/v1/pipgm/items/{itemId}:
+    get:
+      operationId: getItem
+      tags: [Items]
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Library item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/items/hymn:
+    post:
+      operationId: createHymnItem
+      tags: [Items]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                hymnNumber:
+                  type: string
+                includeTitleSlide:
+                  type: boolean
+                stanzas:
+                  type: array
+                  items:
+                    type: object
+                    required: [lines]
+                    properties:
+                      stanzaNumber:
+                        oneOf:
+                          - type: string
+                          - type: integer
+                      lines:
+                        type: array
+                        items:
+                          type: string
+                      refrain:
+                        type: boolean
+                rawText:
+                  type: string
+                targetPipelineId:
+                  $ref: "#/components/schemas/PipelineId"
+                cueImmediately:
+                  type: boolean
+      responses:
+        "201":
+          description: Created hymn item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/items/youtube:
+    post:
+      operationId: createYouTubeItem
+      tags: [Items]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [urlOrId]
+              properties:
+                title:
+                  type: string
+                urlOrId:
+                  type: string
+                startSeconds:
+                  type: number
+                endSeconds:
+                  type: number
+                autoplay:
+                  type: boolean
+                loop:
+                  type: boolean
+                targetPipelineId:
+                  $ref: "#/components/schemas/PipelineId"
+                cueImmediately:
+                  type: boolean
+      responses:
+        "201":
+          description: Created YouTube item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/items/media:
+    post:
+      operationId: createMediaItem
+      tags: [Items]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, filename]
+              properties:
+                kind:
+                  type: string
+                  enum: [video, image]
+                title:
+                  type: string
+                filename:
+                  type: string
+                mimeType:
+                  type: string
+                dataBase64:
+                  type: string
+                  description: File content, base64 encoded (request body limit 50 MB)
+                fit:
+                  type: string
+                  enum: [contain, cover]
+                caption:
+                  type: string
+                durationMs:
+                  type: number
+                autoplay:
+                  type: boolean
+                loop:
+                  type: boolean
+                targetPipelineId:
+                  $ref: "#/components/schemas/PipelineId"
+                cueImmediately:
+                  type: boolean
+      responses:
+        "201":
+          description: Created media item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/items/pptx:
+    post:
+      operationId: createPptxItem
+      tags: [Items]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename]
+              properties:
+                title:
+                  type: string
+                filename:
+                  type: string
+                dataBase64:
+                  type: string
+                animateBulletsByDefault:
+                  type: boolean
+                slides:
+                  type: array
+                  items:
+                    type: object
+                    required: [title]
+                    properties:
+                      slideNumber:
+                        type: integer
+                      title:
+                        type: string
+                      bullets:
+                        type: array
+                        items:
+                          type: string
+                      notes:
+                        type: string
+                      builds:
+                        type: array
+                        items:
+                          type: object
+                targetPipelineId:
+                  $ref: "#/components/schemas/PipelineId"
+                cueImmediately:
+                  type: boolean
+      responses:
+        "201":
+          description: Created PPTX item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/assets/{assetId}:
+    get:
+      operationId: getAsset
+      tags: [Items]
+      parameters:
+        - in: path
+          name: assetId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Asset bytes, with the stored MIME type
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+  parameters:
+    PipelineId:
+      in: path
+      name: pipelineId
+      required: true
+      schema:
+        $ref: "#/components/schemas/PipelineId"
+  responses:
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Invalid:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    PipelineId:
+      type: string
+      enum: [PiPGM1, PiPGM2, PiPGM3]
+    Pipeline:
+      type: object
+      description: Pipeline snapshot; fields as returned by the service (additionalProperties allowed)
+      additionalProperties: true
+    Item:
+      type: object
+      description: Library item; fields as returned by the service
+      additionalProperties: true
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
