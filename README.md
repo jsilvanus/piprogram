@@ -35,9 +35,9 @@ Writes need `Authorization: Bearer <key>` or `x-api-key` when a key is set. Read
 
 Not in 1.0: the Canva routes (`/api/v1/pipgm/canva/*`, `/api/v1/pipgm/items/canva`, `items/:id/canva/export`). They come in 1.1 with the Canva integration. The effects bridge that pimatrix used for PiPGM fades and mutes is not here; a host that needs it should listen for the pipeline snapshots.
 
-## CLI
+## Generated client and CLI
 
-`piprogram` (`dist/cli-main.js`) talks to the API using `PIPGM_URL` and `PIPGM_API_KEY`. It is hand-written against `openapi/openapi.yaml`; it is not generated yet.
+`src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`npm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3100`) and `PIPGM_API_KEY`.
 
 ## Still in pimatrix
 

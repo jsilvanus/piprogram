@@ -321,7 +321,7 @@ paths:
                 rawText:
                   type: string
                 targetPipelineId:
-                  $ref: "#/components/schemas/PipelineId"
+                  $ref: "#/components/schemas/PipgmPipelineId"
                 cueImmediately:
                   type: boolean
       responses:
@@ -358,7 +358,7 @@ paths:
                 loop:
                   type: boolean
                 targetPipelineId:
-                  $ref: "#/components/schemas/PipelineId"
+                  $ref: "#/components/schemas/PipgmPipelineId"
                 cueImmediately:
                   type: boolean
       responses:
@@ -406,7 +406,7 @@ paths:
                 loop:
                   type: boolean
                 targetPipelineId:
-                  $ref: "#/components/schemas/PipelineId"
+                  $ref: "#/components/schemas/PipgmPipelineId"
                 cueImmediately:
                   type: boolean
       responses:
@@ -459,7 +459,7 @@ paths:
                         items:
                           type: object
                 targetPipelineId:
-                  $ref: "#/components/schemas/PipelineId"
+                  $ref: "#/components/schemas/PipgmPipelineId"
                 cueImmediately:
                   type: boolean
       responses:
@@ -503,7 +503,7 @@ components:
       name: pipelineId
       required: true
       schema:
-        $ref: "#/components/schemas/PipelineId"
+        $ref: "#/components/schemas/PipgmPipelineId"
   responses:
     NotFound:
       description: Not found
@@ -518,7 +518,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
-    PipelineId:
+    PipgmPipelineId:
       type: string
       enum: [PiPGM1, PiPGM2, PiPGM3]
     Pipeline:
