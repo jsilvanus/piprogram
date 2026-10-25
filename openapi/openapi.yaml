@@ -70,6 +70,61 @@ paths:
                 $ref: "#/components/schemas/Pipeline"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/pipelines/{pipelineId}/frame.png:
+    get:
+      operationId: getPipelineFrame
+      tags: [Pipelines]
+      description: >
+        The current stage of the pipeline as a PNG, rendered by a headless browser from the stage page.
+        Size defaults to the pipeline resolution (1080x1920 portrait, 1920x1080 landscape). With alpha=1
+        the stage background is left out, so the picture keeps alpha (text and media stay opaque).
+        A fade to black is not applied here: read fadeToBlack from the pipeline. Reads stay open.
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+        - in: query
+          name: width
+          required: false
+          schema:
+            type: integer
+            minimum: 16
+            maximum: 3840
+        - in: query
+          name: height
+          required: false
+          schema:
+            type: integer
+            minimum: 16
+            maximum: 3840
+        - in: query
+          name: alpha
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The stage as a PNG
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "503":
+          description: No browser for the frame route (set PIPGM_CHROMIUM)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: The browser failed to render the frame
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /api/v1/pipgm/pipelines/{pipelineId}/config:
     put:
       operationId: updatePipelineConfig
@@ -524,7 +579,30 @@ components:
     Pipeline:
       type: object
       description: Pipeline snapshot; fields as returned by the service (additionalProperties allowed)
+      properties:
+        slideFeed:
+          $ref: "#/components/schemas/SlideFeed"
       additionalProperties: true
+    SlideFeed:
+      type: object
+      description: >
+        Where the current slide can be read as a PNG, and its real size. aspect is reduced from the
+        real frame size (portrait pipelines are 9:16, not the projectors' 10:16 preset).
+      required: [framePath, width, height, aspect, hasSlide]
+      properties:
+        framePath:
+          type: string
+          description: Path of the frame route for this pipeline (relative to the API root)
+        width:
+          type: integer
+        height:
+          type: integer
+        aspect:
+          type: string
+          example: "9:16"
+        hasSlide:
+          type: boolean
+          description: True while the active item has at least one step
     Item:
       type: object
       description: Library item; fields as returned by the service

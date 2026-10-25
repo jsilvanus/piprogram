@@ -30,6 +30,8 @@ A host that embeds piprogram must provide objects that satisfy these interfaces.
 - Pipelines: list, read, config, control, ftb, audio, playlist add/remove
 - Library items: list, read, hymn, YouTube, media, PPTX, asset bytes
 - Stage page: `GET /pipgm/:pipelineId/stage`
+- Slide frame: `GET /api/v1/pipgm/pipelines/:pipelineId/frame.png?width=&height=&alpha=` renders the current stage as a PNG (default size = the pipeline resolution). `alpha=1` leaves the stage background out, so the picture keeps alpha. It needs a headless Chromium: `PIPGM_CHROMIUM` (default `chromium`; `PIPGM_CHROMIUM_NO_SANDBOX=1` only when running as root). Without one it answers 503. A fade to black is not applied to the picture; read `fadeToBlack` from the pipeline.
+- Pipeline snapshots carry `slideFeed`: the frame path, the real size, the aspect (portrait is 9:16 at 1080x1920, not the projectors' 10:16 preset) and `hasSlide`.
 
 Writes need `Authorization: Bearer <key>` or `x-api-key` when a key is set. Reads stay open.
 
@@ -38,6 +40,8 @@ Not in 1.0: the Canva routes (`/api/v1/pipgm/canva/*`, `/api/v1/pipgm/items/canv
 ## Generated client and CLI
 
 `src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`npm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3100`) and `PIPGM_API_KEY`.
+
+The generated client reads every non-JSON body as text, so it cannot return the frame PNG intact. `piprogram pipelines frame <id> --out file.png [--width n] [--height n] [--alpha]` fetches the frame route directly instead.
 
 ## Still in pimatrix
 

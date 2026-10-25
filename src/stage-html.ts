@@ -9,7 +9,17 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
-export function renderPiPgmStageHtml(pipeline: PiPgmPipelineSnapshot): string {
+export interface PiPgmStageHtmlOptions {
+  /** Leave the stage background out, so a screenshot of it keeps alpha (the frame route). */
+  transparent?: boolean;
+}
+
+const TRANSPARENT_STYLE = `  <style>
+    html, body, #stage-root, #stage-content { background: transparent !important; }
+  </style>
+`;
+
+export function renderPiPgmStageHtml(pipeline: PiPgmPipelineSnapshot, options: PiPgmStageHtmlOptions = {}): string {
   const initialJson = JSON.stringify(pipeline).replace(/<\//g, "<\\/");
   const isPortrait = pipeline.orientation === "portrait";
 
@@ -156,7 +166,7 @@ export function renderPiPgmStageHtml(pipeline: PiPgmPipelineSnapshot): string {
       to { opacity: 1; transform: translateY(0); }
     }
   </style>
-</head>
+${options.transparent ? TRANSPARENT_STYLE : ""}</head>
 <body>
   <div id="stage-root" data-pipeline="${escapeHtml(pipeline.id)}" data-orientation="${escapeHtml(pipeline.orientation)}">
     <div id="stage-content"></div>

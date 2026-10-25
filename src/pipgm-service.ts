@@ -10,6 +10,7 @@ import {
 } from "./canva-adapter.js";
 import {
   buildHymnSteps,
+  buildSlideFeed,
   extractYouTubeVideoId,
   getResolutionForOrientation,
   parseHymnStanzasFromText,
@@ -965,6 +966,7 @@ export class PiPgmService {
       nextStepDetail,
       playbackState: state.playbackState,
       stageUrl: `/pipgm/${encodeURIComponent(state.id)}/stage`,
+      slideFeed: buildSlideFeed(state.id, getResolutionForOrientation(state.orientation), totalSteps > 0),
       mobileAlert: this.buildMobileAlert(state, activeItem, currentStepDetail),
       stream: { ...state.stream },
       playlist: state.playlist.map((item) => structuredClone(item))

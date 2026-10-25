@@ -4,7 +4,7 @@
  * Set PIPGM_URL (default http://127.0.0.1:3100) and PIPGM_API_KEY.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { ApiError, ItemsService, OpenAPI, PipelinesService } from "./generated/index.js";
 import { PipgmPipelineId as PipelineId } from "./generated/index.js";
 
@@ -21,6 +21,7 @@ const USAGE = `Usage: piprogram <command>
 
   pipelines list
   pipelines show <PiPGM1|PiPGM2|PiPGM3>
+  pipelines frame <pipelineId> --out <file.png> [--width n] [--height n] [--alpha]
   pipelines control <pipelineId> <next|prev|play|pause|stop|restart|gotoStep|gotoItem> [--step n] [--item id]
   pipelines ftb <pipelineId> <on|off|toggle>
   pipelines audio <pipelineId> <on|off|toggle>
@@ -66,6 +67,13 @@ function controlArg(value: string | undefined): ControlAction {
   return value as ControlAction;
 }
 
+function optionalSide(value: string | undefined, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) throw new Error(`${name} must be a whole number`);
+  return parsed;
+}
+
 export async function runCli(argv: string[], io: CliIo): Promise<number> {
   OpenAPI.BASE = io.baseUrl.replace(/\/$/, "");
   OpenAPI.TOKEN = io.apiKey;
@@ -83,6 +91,24 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     }
     if (group === "pipelines" && action === "show") {
       io.out(JSON.stringify(await PipelinesService.getPipeline(pipelineArg(rest[0])), null, 2));
+      return 0;
+    }
+    if (group === "pipelines" && action === "frame") {
+      const id = pipelineArg(rest[0]);
+      const out = flag(rest, "--out");
+      if (!out) throw new Error("--out <file.png> is required");
+      const width = optionalSide(flag(rest, "--width"), "--width");
+      const height = optionalSide(flag(rest, "--height"), "--height");
+      // The generated client reads every non-JSON body as text, which would corrupt the PNG,
+      // so the binary route is fetched directly with the same query parameters.
+      const query = new URLSearchParams();
+      if (width !== undefined) query.set("width", String(width));
+      if (height !== undefined) query.set("height", String(height));
+      if (hasFlag(rest, "--alpha")) query.set("alpha", "1");
+      const response = await fetch(`${OpenAPI.BASE}/api/v1/pipgm/pipelines/${encodeURIComponent(id)}/frame.png?${query}`);
+      if (!response.ok) throw new Error(`frame request failed (${response.status}): ${await response.text()}`);
+      await writeFile(out, Buffer.from(await response.arrayBuffer()));
+      io.out(`wrote ${out}`);
       return 0;
     }
     if (group === "pipelines" && action === "control") {
