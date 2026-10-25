@@ -10,7 +10,6 @@ test("the CLI lists pipelines and reports API errors against a live server", asy
   const lines: string[] = [];
   const errors: string[] = [];
   const io = {
-    fetch: (url: string, init?: RequestInit) => fetch(url, init),
     out: (text: string) => lines.push(text),
     err: (text: string) => errors.push(text),
     baseUrl

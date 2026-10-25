@@ -16,10 +16,13 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "start": "node dist/main.js",
-    "cli": "node dist/cli-main.js"
+    "cli": "node dist/cli-main.js",
+    "generate": "openapi --input openapi/openapi.yaml --output src/generated --client fetch && node scripts/fix-generated-imports.mjs",
+    "prebuild": "npm run generate"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "openapi-typescript-codegen": "^0.29.0",
     "typescript": "^5.9.0"
   },
   "dependencies": {
