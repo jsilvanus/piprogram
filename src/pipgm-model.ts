@@ -30,6 +30,39 @@ export function getResolutionForOrientation(orientation: PiPgmOrientation): PiPg
     : { width: 1920, height: 1080 };
 }
 
+/**
+ * Where the current slide can be read as a PNG (the frame route), and its real size.
+ * `aspect` is reduced from the real frame size, so a portrait pipeline is "9:16" (1080x1920),
+ * not the projectors' 10:16 preset.
+ */
+export interface PiPgmSlideFeed {
+  framePath: string;
+  width: number;
+  height: number;
+  aspect: string;
+  hasSlide: boolean;
+}
+
+export function aspectRatioLabel(width: number, height: number): string {
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const divisor = gcd(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
+export function buildSlideFeed(
+  pipelineId: PiPgmPipelineId,
+  resolution: PiPgmResolution,
+  hasSlide: boolean
+): PiPgmSlideFeed {
+  return {
+    framePath: `/api/v1/pipgm/pipelines/${encodeURIComponent(pipelineId)}/frame.png`,
+    width: resolution.width,
+    height: resolution.height,
+    aspect: aspectRatioLabel(resolution.width, resolution.height),
+    hasSlide
+  };
+}
+
 export type PptxAnimationEffect =
   | "initial"
   | "appear"
@@ -198,6 +231,7 @@ export interface PiPgmPipelineSnapshot {
   nextStepDetail: PiPgmStepDescriptor | null;
   playbackState: PiPgmPlaybackState;
   stageUrl: string;
+  slideFeed: PiPgmSlideFeed;
   mobileAlert: PiPgmMobileAlert;
   stream: ManagedStreamSnapshot;
   playlist: PiPgmItem[];

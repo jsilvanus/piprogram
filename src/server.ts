@@ -17,6 +17,7 @@ import type {
   PptxAnimationEffect
 } from "./pipgm-model.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
+import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmFrameRenderer } from "./frame.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** Service instance; a new PiPgmService is created from the options when omitted. */
@@ -25,6 +26,41 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
   apiKey?: string | undefined;
   /** Logger passed to Fastify; false disables logging. */
   logger?: boolean;
+  /** Renders the frame route. Defaults to headless Chromium (PIPGM_CHROMIUM). */
+  frameRenderer?: PipgmFrameRenderer;
+}
+
+const FRAME_MIN_SIDE = 16;
+const FRAME_MAX_SIDE = 3840;
+
+type FrameQuery = { width?: string; height?: string; alpha?: string };
+
+/** Frame size and alpha from the query string; the pipeline's own resolution is the default. */
+function parseFrameQuery(
+  query: FrameQuery,
+  resolution: { width: number; height: number }
+): { ok: true; width: number; height: number; alpha: boolean } | { ok: false; message: string } {
+  const side = (value: string | undefined, fallback: number, name: string) => {
+    if (value === undefined) return { ok: true as const, value: fallback };
+    const parsed = /^\d+$/.test(value) ? Number(value) : NaN;
+    if (!Number.isInteger(parsed) || parsed < FRAME_MIN_SIDE || parsed > FRAME_MAX_SIDE) {
+      return { ok: false as const, message: `${name} must be a whole number from ${FRAME_MIN_SIDE} to ${FRAME_MAX_SIDE}` };
+    }
+    return { ok: true as const, value: parsed };
+  };
+  const width = side(query.width, resolution.width, "width");
+  if (!width.ok) return { ok: false, message: width.message };
+  const height = side(query.height, resolution.height, "height");
+  if (!height.ok) return { ok: false, message: height.message };
+  if (query.alpha !== undefined && !["1", "0", "true", "false"].includes(query.alpha)) {
+    return { ok: false, message: "alpha must be 1, 0, true or false" };
+  }
+  return {
+    ok: true,
+    width: width.value,
+    height: height.value,
+    alpha: query.alpha === "1" || query.alpha === "true"
+  };
 }
 
 const VALID_CONTROL_ACTIONS = new Set<PiPgmControlAction>([
@@ -81,6 +117,34 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     if (!pipeline) return notFound(reply, request.params.pipelineId);
     return reply.type("text/html; charset=utf-8").send(renderPiPgmStageHtml(pipeline));
   });
+
+  const renderFrame = options.frameRenderer ?? createChromiumFrameRenderer();
+
+  app.get<{ Params: { pipelineId: string }; Querystring: FrameQuery }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/frame.png",
+    async (request, reply) => {
+      const pipeline = service.getPipeline(request.params.pipelineId);
+      if (!pipeline) return notFound(reply, request.params.pipelineId);
+      const frame = parseFrameQuery(request.query ?? {}, pipeline.resolution);
+      if (!frame.ok) return invalid(reply, "INVALID_FRAME_SIZE", frame.message);
+      try {
+        const png = await renderFrame({
+          html: renderPiPgmStageHtml(pipeline, { transparent: frame.alpha }),
+          width: frame.width,
+          height: frame.height,
+          transparent: frame.alpha
+        });
+        return reply.type("image/png").header("cache-control", "no-cache").send(png);
+      } catch (error) {
+        if (error instanceof FrameRendererUnavailableError) {
+          return reply.code(503).send({ error: { code: "FRAME_RENDERER_UNAVAILABLE", message: error.message } });
+        }
+        return reply.code(500).send({
+          error: { code: "FRAME_RENDER_FAILED", message: error instanceof Error ? error.message : "Frame render failed" }
+        });
+      }
+    }
+  );
 
   // ---- Pipelines -----------------------------------------------------------
 
