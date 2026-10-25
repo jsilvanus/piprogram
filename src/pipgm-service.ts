@@ -1,5 +1,4 @@
-import type { PiMatrixEventBroker } from "../events.js";
-import type { ManagedStreamSnapshot } from "../stream-supervisor.js";
+import type { ManagedStreamSnapshot, PiMatrixEventBroker } from "./types/external.js";
 import {
   buildCanvaSteps,
   createCanvaItemData,

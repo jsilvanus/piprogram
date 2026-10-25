@@ -1,4 +1,4 @@
-import type { ManagedStreamSnapshot } from "../stream-supervisor.js";
+import type { ManagedStreamSnapshot } from "./types/external.js";
 
 export const pipgmPipelineDefinitions = [
   { id: "PiPGM1", label: "Pi Programme 1", defaultOrientation: "portrait" as const, defaultHidden: false },
