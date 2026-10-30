@@ -92,7 +92,8 @@ function presentedKey(request: FastifyRequest): string | undefined {
 }
 
 export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInstance {
-  const service = options.service ?? new PiPgmService(options);
+  const renderFrame = options.frameRenderer ?? createChromiumFrameRenderer();
+  const service = options.service ?? new PiPgmService({ frameRenderer: renderFrame, ...options });
   const app = Fastify({
     logger: options.logger ?? false,
     bodyLimit: 50 * 1024 * 1024 // direct .pptx, video and image uploads (base64 JSON)
@@ -117,8 +118,6 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     if (!pipeline) return notFound(reply, request.params.pipelineId);
     return reply.type("text/html; charset=utf-8").send(renderPiPgmStageHtml(pipeline));
   });
-
-  const renderFrame = options.frameRenderer ?? createChromiumFrameRenderer();
 
   app.get<{ Params: { pipelineId: string }; Querystring: FrameQuery }>(
     "/api/v1/pipgm/pipelines/:pipelineId/frame.png",
@@ -190,6 +189,36 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     });
     return reply.code(200).send(updated);
   });
+
+  app.post<{ Params: { pipelineId: string } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/sync-piswitch",
+    async (request, reply) => {
+      if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
+      const client = service.getPiSwitchClient();
+      if (!client) {
+        return reply.code(503).send({
+          error: {
+            code: "PISWITCH_NOT_CONFIGURED",
+            message: "piswitch integration is not configured (set PISWITCH_URL)"
+          }
+        });
+      }
+      const result = await service.syncToPiSwitch(request.params.pipelineId);
+      if (!result) {
+        return reply.code(502).send({
+          error: {
+            code: "PISWITCH_SYNC_FAILED",
+            message: "Failed to sync slide to piswitch media pool"
+          }
+        });
+      }
+      return reply.code(200).send({
+        pipelineId: request.params.pipelineId,
+        synced: true,
+        slideBuffer: result
+      });
+    }
+  );
 
   app.post<{
     Params: { pipelineId: string };

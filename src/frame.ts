@@ -103,7 +103,8 @@ export function createChromiumFrameRenderer(options: ChromiumFrameRendererOption
 
 function runBrowser(binary: string, args: string[], timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { stdio: ["ignore", "ignore", "pipe"] });
+    const isBatchOnWindows = process.platform === "win32" && (binary.toLowerCase().endsWith(".cmd") || binary.toLowerCase().endsWith(".bat"));
+    const child = spawn(binary, args, { stdio: ["ignore", "ignore", "pipe"], shell: isBatchOnWindows });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
       stderr = (stderr + chunk.toString("utf8")).slice(-2000);

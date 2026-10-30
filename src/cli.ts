@@ -23,6 +23,7 @@ const USAGE = `Usage: piprogram <command>
   pipelines show <PiPGM1|PiPGM2|PiPGM3>
   pipelines frame <pipelineId> --out <file.png> [--width n] [--height n] [--alpha]
   pipelines control <pipelineId> <next|prev|play|pause|stop|restart|gotoStep|gotoItem> [--step n] [--item id]
+  pipelines sync <pipelineId>
   pipelines ftb <pipelineId> <on|off|toggle>
   pipelines audio <pipelineId> <on|off|toggle>
   pipelines orientation <pipelineId> <landscape|portrait>
@@ -122,6 +123,18 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         ...(item !== undefined ? { itemId: item } : {})
       });
       io.out(`${id}: ${name} sent`);
+      return 0;
+    }
+    if (group === "pipelines" && (action === "sync-piswitch" || action === "sync")) {
+      const id = pipelineArg(rest[0]);
+      const res = await fetch(`${OpenAPI.BASE}/api/v1/pipgm/pipelines/${encodeURIComponent(id)}/sync-piswitch`, {
+        method: "POST",
+        headers: io.apiKey ? { Authorization: `Bearer ${io.apiKey}` } : {}
+      });
+      if (!res.ok) {
+        throw new Error(`sync failed (${res.status}): ${await res.text()}`);
+      }
+      io.out(JSON.stringify(await res.json(), null, 2));
       return 0;
     }
     if (group === "pipelines" && action === "ftb") {

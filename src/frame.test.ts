@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { chromiumScreenshotArgs, createChromiumFrameRenderer, FrameRendererUnavailableError, isPng } from "./frame.js";
 import { buildPipgmServer } from "./server.js";
@@ -27,7 +28,7 @@ test("the screenshot command line keeps alpha only when asked", () => {
   assert.ok(opaque.includes("--screenshot=/tmp/x/frame.png"));
   assert.ok(opaque.some((arg) => arg.startsWith("--user-data-dir=")));
   assert.ok(!opaque.some((arg) => arg.startsWith("--default-background-color")));
-  assert.equal(opaque.at(-1), "file:///tmp/x/stage.html");
+  assert.equal(opaque.at(-1), pathToFileURL("/tmp/x/stage.html").href);
 
   const keyed = chromiumScreenshotArgs({ ...base, transparent: true, noSandbox: true });
   assert.ok(keyed.includes("--default-background-color=00000000"));
@@ -56,7 +57,12 @@ writeFileSync(arg.slice("--screenshot=".length), Buffer.from(${JSON.stringify(PN
 `
     );
     await chmod(script, 0o755);
-    const render = createChromiumFrameRenderer({ binary: script });
+    let binary = script;
+    if (process.platform === "win32") {
+      binary = join(dir, "fake-chromium.cmd");
+      await writeFile(binary, "@echo off\r\nnode \"%~dp0fake-chromium.mjs\" %*\r\n");
+    }
+    const render = createChromiumFrameRenderer({ binary });
     const png = await render({ html: "<p>x</p>", width: 16, height: 16, transparent: true });
     assert.ok(isPng(png));
   } finally {

@@ -1,3 +1,6 @@
+import { PiSwitchClient, type SlideAdvanceResult } from "./piswitch-client.js";
+import { renderPiPgmStageHtml } from "./stage-html.js";
+import type { PipgmFrameRenderer } from "./frame.js";
 import type { ManagedStreamSnapshot, PiMatrixEventBroker } from "./types/external.js";
 import {
   buildCanvaSteps,
@@ -107,6 +110,11 @@ export interface CreatePptxItemInput {
 export interface PiPgmServiceOptions {
   eventBroker?: PiMatrixEventBroker | undefined;
   canvaConfig?: CanvaConnectConfig | undefined;
+  piswitchUrl?: string | undefined;
+  piswitchApiKey?: string | undefined;
+  piswitchClient?: PiSwitchClient | undefined;
+  autoSyncPiswitch?: boolean | undefined;
+  frameRenderer?: PipgmFrameRenderer | undefined;
 }
 
 export class PiPgmService {
@@ -115,11 +123,24 @@ export class PiPgmService {
   private readonly assets = new Map<string, PiPgmAsset>();
   private readonly eventBroker?: PiMatrixEventBroker | undefined;
   private readonly canvaConfig: CanvaConnectConfig;
+  private readonly piswitchClient?: PiSwitchClient | undefined;
+  private readonly autoSyncPiswitch: boolean;
+  private readonly frameRenderer?: PipgmFrameRenderer | undefined;
   private idCounter = 1;
 
   constructor(options: PiPgmServiceOptions = {}) {
     this.eventBroker = options.eventBroker;
     this.canvaConfig = options.canvaConfig ?? {};
+    this.frameRenderer = options.frameRenderer;
+    if (options.piswitchClient) {
+      this.piswitchClient = options.piswitchClient;
+    } else if (options.piswitchUrl || process.env.PISWITCH_URL) {
+      this.piswitchClient = new PiSwitchClient({
+        baseUrl: options.piswitchUrl,
+        apiKey: options.piswitchApiKey
+      });
+    }
+    this.autoSyncPiswitch = options.autoSyncPiswitch ?? (this.piswitchClient !== undefined);
 
     for (const def of pipgmPipelineDefinitions) {
       this.pipelines.set(def.id, {
@@ -405,6 +426,16 @@ export class PiPgmService {
 
     const snapshot = this.toSnapshot(state);
     this.emitPipelineEvent(`control:${request.action}`, snapshot);
+
+    if (
+      this.autoSyncPiswitch &&
+      (request.action === "next" ||
+        request.action === "prev" ||
+        request.action === "gotoStep" ||
+        request.action === "gotoItem")
+    ) {
+      void this.syncToPiSwitch(pipelineId).catch(() => {});
+    }
 
     if (!isSyncedCall && (request.sync || state.linked)) {
       for (const peer of this.pipelines.values()) {
@@ -971,6 +1002,41 @@ export class PiPgmService {
       stream: { ...state.stream },
       playlist: state.playlist.map((item) => structuredClone(item))
     };
+  }
+
+
+  getPiSwitchClient(): PiSwitchClient | undefined {
+    return this.piswitchClient;
+  }
+
+  async syncToPiSwitch(pipelineId: string): Promise<SlideAdvanceResult | null> {
+    if (!this.piswitchClient) return null;
+    const pipeline = this.getPipeline(pipelineId);
+    if (!pipeline) return null;
+
+    try {
+      const advanceResult = await this.piswitchClient.advanceSlide();
+
+      if (this.frameRenderer) {
+        try {
+          const png = await this.frameRenderer({
+            html: renderPiPgmStageHtml(pipeline, { transparent: true }),
+            width: pipeline.resolution.width,
+            height: pipeline.resolution.height,
+            transparent: true
+          });
+          const slideName = `pipgm-${pipeline.id}-step${pipeline.currentStep}`;
+          await this.piswitchClient.uploadStill(advanceResult.activeSlot, png, slideName, "slides");
+        } catch {
+          // frame rendering or upload failed, but buffer advanced
+        }
+      }
+
+      this.emitPipelineEvent("piswitch:synced", pipeline);
+      return advanceResult;
+    } catch {
+      return null;
+    }
   }
 
   private emitPipelineEvent(action: string, snapshot: PiPgmPipelineSnapshot): void {
