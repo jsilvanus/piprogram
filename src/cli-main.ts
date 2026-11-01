@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { runCli } from "./cli.js";
 
-const baseUrl = process.env.PIPGM_URL ?? "http://127.0.0.1:3000";
+const baseUrl = process.env.PIPGM_URL ?? "http://127.0.0.1:3200";
 const apiKey = process.env.PIPGM_API_KEY?.trim() || undefined;
 
 runCli(process.argv.slice(2), {
