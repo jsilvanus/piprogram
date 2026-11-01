@@ -1,7 +1,7 @@
 /**
  * `piprogram` CLI for the PiPGM API. Commands call the client generated from
  * openapi/openapi.yaml (src/generated). Regenerate with `npm run generate`.
- * Set PIPGM_URL (default http://127.0.0.1:3100) and PIPGM_API_KEY.
+ * Set PIPGM_URL (default http://127.0.0.1:3200) and PIPGM_API_KEY.
  */
 
 import { readFile, writeFile } from "node:fs/promises";

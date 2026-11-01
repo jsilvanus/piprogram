@@ -4,7 +4,7 @@ info:
   version: 1.0.0
   description: PiPGM pipelines, library items and stage page, split from pimatrix. Canva routes come in 1.1.
 servers:
-  - url: http://127.0.0.1:3100
+  - url: http://127.0.0.1:3200
 tags:
   - name: System
   - name: Pipelines

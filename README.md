@@ -7,9 +7,9 @@ Extracted from `jsilvanus/pimatrix` (`packages/api/src/pipgm`).
 ## Build and test
 
 ```bash
-npm install
-npm run build   # tsc -p tsconfig.json -> dist/
-npm test        # build, then node --test (no test files yet)
+pnpm install
+pnpm run build   # tsc -p tsconfig.json -> dist/
+pnpm test        # build, then node --test (no test files yet)
 ```
 
 Requires Node.js 24 or later. Dependencies: `typescript` and `@types/node` only.
@@ -25,7 +25,7 @@ A host that embeds piprogram must provide objects that satisfy these interfaces.
 
 ## HTTP API (1.0)
 
-`npm start` runs the PiPGM API (`PIPGM_PORT`, default 3100; `PIPGM_HOST`, default 127.0.0.1; `PIPGM_API_KEY` required for any non-loopback host). Routes and error shapes match the old pimatrix `/api/v1/pipgm/*` routes, so clients keep working; the contract is `openapi/openapi.yaml`.
+`pnpm start` runs the PiPGM API (`PIPGM_PORT`, default 3200; `PIPGM_HOST`, default 127.0.0.1; `PIPGM_API_KEY` required for any non-loopback host). Routes and error shapes match the old pimatrix `/api/v1/pipgm/*` routes, so clients keep working; the contract is `openapi/openapi.yaml`.
 
 - Pipelines: list, read, config, control, ftb, audio, playlist add/remove
 - Library items: list, read, hymn, YouTube, media, PPTX, asset bytes
@@ -39,7 +39,7 @@ Not in 1.0: the Canva routes (`/api/v1/pipgm/canva/*`, `/api/v1/pipgm/items/canv
 
 ## Generated client and CLI
 
-`src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`npm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3100`) and `PIPGM_API_KEY`.
+`src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`pnpm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3200`) and `PIPGM_API_KEY`.
 
 The generated client reads every non-JSON body as text, so it cannot return the frame PNG intact. `piprogram pipelines frame <id> --out file.png [--width n] [--height n] [--alpha]` fetches the frame route directly instead.
 

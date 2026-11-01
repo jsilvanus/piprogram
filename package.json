@@ -1,6 +1,7 @@
 {
   "name": "piprogram",
   "version": "0.1.0",
+  "packageManager": "pnpm@11.23.0",
   "private": true,
   "description": "Content for distribution: hymns, slides, PPTX, Canva integration and the stage page.",
   "type": "module",
@@ -14,11 +15,11 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "test": "pnpm run build && node --test \"dist/**/*.test.js\"",
     "start": "node dist/main.js",
     "cli": "node dist/cli-main.js",
     "generate": "openapi --input openapi/openapi.yaml --output src/generated --client fetch && node scripts/fix-generated-imports.mjs",
-    "prebuild": "npm run generate"
+    "prebuild": "pnpm run generate"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -30,5 +31,13 @@
   },
   "bin": {
     "piprogram": "dist/cli-main.js"
+  },
+  "pi": {
+    "service": "piprogram",
+    "layer": "Layer 2: Media pipeline",
+    "displayName": "PiProgram (PiPGM)",
+    "port": 3200,
+    "healthEndpoint": "/health",
+    "envPortVar": "PIPGM_PORT"
   }
 }

@@ -58,7 +58,7 @@ export class PiSwitchClient {
   private readonly timeoutMs: number;
 
   constructor(options: PiSwitchClientOptions = {}) {
-    this.baseUrl = (options.baseUrl ?? process.env.PISWITCH_URL ?? "http://127.0.0.1:3200").replace(/\/+$/, "");
+    this.baseUrl = (options.baseUrl ?? process.env.PISWITCH_URL ?? "http://127.0.0.1:3103").replace(/\/+$/, "");
     this.apiKey = options.apiKey ?? process.env.PISWITCH_API_KEY?.trim() ?? undefined;
     this.fetchFn = options.fetchFn ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 5000;
