@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { PiSwitchClient, PiSwitchError } from "./piswitch-client.js";
 
 test("PiSwitchClient: uses default URL or environment variable", () => {
-  const client1 = new PiSwitchClient({ baseUrl: "http://example.com:3200/" });
-  assert.equal(client1.configuredUrl, "http://example.com:3200");
+  const client1 = new PiSwitchClient({ baseUrl: "http://example.com:3103/" });
+  assert.equal(client1.configuredUrl, "http://example.com:3103");
 
   const client2 = new PiSwitchClient({});
   assert.ok(client2.configuredUrl.length > 0);
@@ -12,7 +12,7 @@ test("PiSwitchClient: uses default URL or environment variable", () => {
 
 test("PiSwitchClient: getSlideStatus calls status endpoint", async () => {
   const mockFetch: typeof fetch = async (input, init) => {
-    assert.equal(input.toString(), "http://mock-piswitch:3200/api/v1/video-mixer/media-pool/slides/status");
+    assert.equal(input.toString(), "http://mock-piswitch:3103/api/v1/video-mixer/media-pool/slides/status");
     assert.equal(init?.method, "GET");
     return new Response(
       JSON.stringify({
@@ -27,7 +27,7 @@ test("PiSwitchClient: getSlideStatus calls status endpoint", async () => {
   };
 
   const client = new PiSwitchClient({
-    baseUrl: "http://mock-piswitch:3200",
+    baseUrl: "http://mock-piswitch:3103",
     fetchFn: mockFetch
   });
 
@@ -39,7 +39,7 @@ test("PiSwitchClient: getSlideStatus calls status endpoint", async () => {
 test("PiSwitchClient: advanceSlide calls advance endpoint with optional slot", async () => {
   let calledBody: string | undefined;
   const mockFetch: typeof fetch = async (input, init) => {
-    assert.equal(input.toString(), "http://mock-piswitch:3200/api/v1/video-mixer/media-pool/slides/advance");
+    assert.equal(input.toString(), "http://mock-piswitch:3103/api/v1/video-mixer/media-pool/slides/advance");
     assert.equal(init?.method, "POST");
     const headers = init?.headers as Record<string, string> | undefined;
     assert.equal(headers?.["Authorization"], "Bearer secret-token");
@@ -56,7 +56,7 @@ test("PiSwitchClient: advanceSlide calls advance endpoint with optional slot", a
   };
 
   const client = new PiSwitchClient({
-    baseUrl: "http://mock-piswitch:3200",
+    baseUrl: "http://mock-piswitch:3103",
     apiKey: "secret-token",
     fetchFn: mockFetch
   });
@@ -88,13 +88,13 @@ test("PiSwitchClient: uploadStill sends raw binary to slot", async () => {
   };
 
   const client = new PiSwitchClient({
-    baseUrl: "http://mock-piswitch:3200",
+    baseUrl: "http://mock-piswitch:3103",
     fetchFn: mockFetch
   });
 
   const dummyBytes = Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
   const res = await client.uploadStill(4, dummyBytes, "test-slide");
-  assert.equal(calledUrl, "http://mock-piswitch:3200/api/v1/video-mixer/media-pool/slots/4?pool=slides&name=test-slide");
+  assert.equal(calledUrl, "http://mock-piswitch:3103/api/v1/video-mixer/media-pool/slots/4?pool=slides&name=test-slide");
   assert.equal(calledMethod, "PUT");
   assert.equal(res.slot, 4);
   assert.equal(res.bytes, 8);
@@ -102,7 +102,7 @@ test("PiSwitchClient: uploadStill sends raw binary to slot", async () => {
 
 test("PiSwitchClient: setMediaPlayerSource sets source slot", async () => {
   const mockFetch: typeof fetch = async (input, init) => {
-    assert.equal(input.toString(), "http://mock-piswitch:3200/api/v1/video-mixer/media-players/1/source");
+    assert.equal(input.toString(), "http://mock-piswitch:3103/api/v1/video-mixer/media-players/1/source");
     assert.equal(init?.method, "PUT");
     return new Response(
       JSON.stringify({ player: 1, stillSlot: 2 }),
@@ -111,7 +111,7 @@ test("PiSwitchClient: setMediaPlayerSource sets source slot", async () => {
   };
 
   const client = new PiSwitchClient({
-    baseUrl: "http://mock-piswitch:3200",
+    baseUrl: "http://mock-piswitch:3103",
     fetchFn: mockFetch
   });
 
@@ -129,7 +129,7 @@ test("PiSwitchClient: handles API errors gracefully", async () => {
   };
 
   const client = new PiSwitchClient({
-    baseUrl: "http://mock-piswitch:3200",
+    baseUrl: "http://mock-piswitch:3103",
     fetchFn: mockFetch
   });
 

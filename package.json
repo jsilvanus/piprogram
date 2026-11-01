@@ -35,7 +35,7 @@
   "pi": {
     "service": "piprogram",
     "displayName": "PiProgram (PiPGM)",
-    "port": 3100,
+    "port": 3000,
     "healthEndpoint": "/health",
     "envPortVar": "PIPGM_PORT"
   }
