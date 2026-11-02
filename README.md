@@ -37,6 +37,18 @@ Writes need `Authorization: Bearer <key>` or `x-api-key` when a key is set. Read
 
 Not in 1.0: the Canva routes (`/api/v1/pipgm/canva/*`, `/api/v1/pipgm/items/canva`, `items/:id/canva/export`). They come in 1.1 with the Canva integration. The effects bridge that pimatrix used for PiPGM fades and mutes is not here; a host that needs it should listen for the pipeline snapshots.
 
+## Audio and the basic image
+
+Each of the three feeds has **visual content** (the active item, or black) and, separately, **audio content** (a track). A video item carries its own sound as before. piprogram only outputs the feed; where the sound ends up after the Atlona (the PA, via the left projector on output 1) is not its concern.
+
+- **Arm state:** sound is off by default. `POST /pipelines/:id/audio {audioEnabled:true, armSeconds?}` arms it for `armSeconds` (default `PIPGM_AUDIO_ARM_SECONDS`, 900; at most 3600). When the time ends the feed is disarmed by itself, the track stops, and video items on it go silent. `audioArmedUntil` shows the end.
+- **Play:** `POST /pipelines/:id/audio/play {itemId, loop?, volume?}` starts an audio library item (create one with `POST /items/media {kind:"audio"}`). Refused with 409 `AUDIO_NOT_ARMED` unless armed. `POST .../audio/stop` stops the track and leaves the feed armed. The sound fades in over 1.5 s.
+- **Gain cap:** `PIPGM_AUDIO_MAX_VOLUME` (default 60) is the highest volume any feed plays at. `volume` is what was asked for, `effectiveVolume` what the stage plays (applies to video items too).
+- **Kill switch:** `POST /api/v1/pipgm/audio/kill` stops every track, disarms and mutes all feeds at once (CLI: `piprogram audio kill`). It needs the API key like any write.
+- **Basic image:** `PUT /pipelines/:id/basic-image {itemId|null}` picks an image library item that a feed shows when nothing else is active. The default stays black.
+- The browser that shows the stage page must be allowed to autoplay (for Chromium: `--autoplay-policy=no-user-gesture-required`). Frame renders (`frame.png`, the piswitch sync) never play sound.
+- A non-looping track that has finished stays in the snapshot as `audioTrack` until it is stopped or the arming ends. Tests: `src/audio.test.ts`. Not tried on the Pi or with a real PA.
+
 ## Generated client and CLI
 
 `src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`pnpm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3200`) and `PIPGM_API_KEY`.

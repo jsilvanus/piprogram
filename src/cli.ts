@@ -25,7 +25,11 @@ const USAGE = `Usage: piprogram <command>
   pipelines control <pipelineId> <next|prev|play|pause|stop|restart|gotoStep|gotoItem> [--step n] [--item id]
   pipelines sync <pipelineId>
   pipelines ftb <pipelineId> <on|off|toggle>
-  pipelines audio <pipelineId> <on|off|toggle>
+  pipelines audio <pipelineId> <on|off|toggle> [--seconds n]   (on = arm sound for n seconds, default from the server)
+  pipelines audio-play <pipelineId> <itemId> [--loop] [--volume n]
+  pipelines audio-stop <pipelineId>
+  pipelines basic-image <pipelineId> <itemId|none>
+  audio kill   (silence and disarm every pipeline)
   pipelines orientation <pipelineId> <landscape|portrait>
   pipelines playlist add <pipelineId> <itemId> [--cue]
   pipelines playlist remove <pipelineId> <itemId>
@@ -147,8 +151,40 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     if (group === "pipelines" && action === "audio") {
       const id = pipelineArg(rest[0]);
       const v = tristate(rest[1]);
-      await PipelinesService.setPipelineAudio(id, v === "toggle" ? { toggle: true } : { audioEnabled: v });
+      const seconds = flag(rest, "--seconds");
+      const armSeconds = seconds !== undefined ? { armSeconds: Number(seconds) } : {};
+      await PipelinesService.setPipelineAudio(id, v === "toggle" ? { toggle: true, ...armSeconds } : { audioEnabled: v, ...armSeconds });
       io.out(`${id}: audio ${rest[1]}`);
+      return 0;
+    }
+    if (group === "pipelines" && action === "audio-play") {
+      const id = pipelineArg(rest[0]);
+      if (!rest[1]) throw new Error("itemId is required");
+      const volume = flag(rest, "--volume");
+      await PipelinesService.playPipelineAudio(id, {
+        itemId: rest[1],
+        ...(hasFlag(rest, "--loop") ? { loop: true } : {}),
+        ...(volume !== undefined ? { volume: Number(volume) } : {})
+      });
+      io.out(`${id}: playing ${rest[1]}`);
+      return 0;
+    }
+    if (group === "pipelines" && action === "audio-stop") {
+      const id = pipelineArg(rest[0]);
+      await PipelinesService.stopPipelineAudio(id);
+      io.out(`${id}: audio stopped`);
+      return 0;
+    }
+    if (group === "pipelines" && action === "basic-image") {
+      const id = pipelineArg(rest[0]);
+      if (!rest[1]) throw new Error("itemId (or none) is required");
+      await PipelinesService.setPipelineBasicImage(id, { itemId: rest[1] === "none" ? null : rest[1] });
+      io.out(`${id}: basic image ${rest[1]}`);
+      return 0;
+    }
+    if (group === "audio" && action === "kill") {
+      await PipelinesService.killAudio();
+      io.out("audio killed on all pipelines");
       return 0;
     }
     if (group === "pipelines" && action === "orientation") {

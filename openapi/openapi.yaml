@@ -247,6 +247,14 @@ paths:
                   type: number
                   minimum: 0
                   maximum: 100
+                  description: Requested volume; the stage plays at most maxVolume (PIPGM_AUDIO_MAX_VOLUME)
+                armSeconds:
+                  type: number
+                  minimum: 1
+                  maximum: 3600
+                  description: >
+                    How long sound stays armed when audioEnabled turns on or toggles on
+                    (default PIPGM_AUDIO_ARM_SECONDS, 900). When it ends, sound is disarmed and the track stops.
                 sync:
                   type: boolean
       responses:
@@ -256,6 +264,116 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/pipelines/{pipelineId}/audio/play:
+    post:
+      operationId: playPipelineAudio
+      tags: [Pipelines]
+      description: Play an audio library item as the feed's audio content (separate from its visual). Needs sound armed.
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [itemId]
+              properties:
+                itemId:
+                  type: string
+                loop:
+                  type: boolean
+                volume:
+                  type: number
+                  minimum: 0
+                  maximum: 100
+      responses:
+        "200":
+          description: Pipeline after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "404":
+          description: Unknown pipeline or item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Sound is not armed (error code AUDIO_NOT_ARMED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/pipelines/{pipelineId}/audio/stop:
+    post:
+      operationId: stopPipelineAudio
+      tags: [Pipelines]
+      description: Stop the feed's audio track. The feed stays armed.
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      responses:
+        "200":
+          description: Pipeline after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/audio/kill:
+    post:
+      operationId: killAudio
+      tags: [Pipelines]
+      description: >
+        Kill switch. On every pipeline: stop the audio track, disarm and mute (video items go silent too).
+        Needs the API key like any write.
+      responses:
+        "200":
+          description: All pipelines after the kill
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/pipelines/{pipelineId}/basic-image:
+    put:
+      operationId: setPipelineBasicImage
+      tags: [Pipelines]
+      description: Choose an image library item to show when nothing else is active (null clears it; the default is black).
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [itemId]
+              properties:
+                itemId:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Pipeline after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "404":
+          description: Unknown pipeline or item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Invalid"
   /api/v1/pipgm/pipelines/{pipelineId}/playlist:
     post:
       operationId: addPlaylistItem
@@ -439,7 +557,7 @@ paths:
               properties:
                 kind:
                   type: string
-                  enum: [video, image]
+                  enum: [video, image, audio]
                 title:
                   type: string
                 filename:
