@@ -63,6 +63,24 @@ piprogram can push PiPGM1-3 to MediaMTX itself, so pimatrix does not have to pol
 - **Do not run two publishers.** Turn pimatrix's own PiPGM publishing off (`PIMATRIX_PIPGM_FEED=publish-off`) before enabling this, or both fight for the same stream names.
 - Video and embedded items show only their still frame here; moving content needs the live route. Tests: `src/feeder.test.ts` (fake ffmpeg); the PNG frames and the picture swap were checked against a real ffmpeg once. Not tried against MediaMTX or on the Pi.
 
+## Keeping the library in pistorage
+
+By default the media library (uploaded images, audio, video, .pptx files, hymns, Canva items) lives in memory and is gone after a restart. Set `PIPGM_STORAGE_URL` (for example `http://127.0.0.1:3700`) to keep it in [pistorage](https://github.com/jsilvanus/pistorage), which stores the files in S3 and caches them on the Pi.
+
+| Variable | Meaning |
+|---|---|
+| `PIPGM_STORAGE_URL` | pistorage base URL. Unset = memory only. |
+| `PIPGM_STORAGE_API_KEY` | pistorage key, sent as a Bearer token on reads and writes (pistorage wants it for both when it has a key). |
+| `PIPGM_STORAGE_PREFIX` | Key prefix, default `piprogram/library`. |
+
+- Each item is stored as `<prefix>/items/<id>.json` and its bytes as `<prefix>/assets/<assetId>`. The bytes are written first, so a listed item always has them.
+- At start the items are read back and ids continue after the highest stored one. File bytes are fetched from pistorage when a browser or the stage asks for them (503 if pistorage is down, never a silent empty file).
+- A write that fails (pistorage or the bucket is down) keeps the item in memory as *unsaved* and is retried every minute. `GET /api/v1/pipgm/library/storage` lists unsaved items and the last error. If pistorage is down at start, loading is retried the same way.
+- `DELETE /api/v1/pipgm/items/{itemId}` removes the item, its files and its places in the playlists.
+- Prepared speech is not stored there: it is rebuilt from text and stays in `PIPGM_CACHE_DIR`.
+- Canva exports are links, not files, so there is nothing to keep (and no retention deadline) for them yet.
+- Not run against a real pistorage or S3; the tests use a fake store and a fake fetch.
+
 ## Generated client and CLI
 
 `src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`pnpm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3200`) and `PIPGM_API_KEY`.

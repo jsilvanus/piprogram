@@ -23,6 +23,8 @@ import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmF
 import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
+  /** How often an unloaded library or unsaved items are retried against the store (default 60 s). */
+  libraryRetryMs?: number | undefined;
   /** Service instance; a new PiPgmService is created from the options when omitted. */
   service?: PiPgmService;
   /** API key for mutating requests. Undefined = open (development). */
@@ -137,6 +139,50 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     app.addHook("onReady", async () => feeders.start());
     app.addHook("onClose", async () => feeders.stop());
   }
+
+  // The stored library is read when the server is ready; if the store is down, that and any unsaved
+  // writes are retried on a timer until they go through.
+  let libraryLoaded = !options.libraryStore;
+  let libraryTimer: ReturnType<typeof setInterval> | null = null;
+  const syncLibrary = async (): Promise<void> => {
+    try {
+      if (!libraryLoaded) {
+        const count = await service.loadLibrary((key, reason) => app.log.warn({ key, reason }, "library entry skipped"));
+        libraryLoaded = true;
+        app.log.info({ count }, "library loaded from the store");
+      }
+      await service.flushLibrary();
+    } catch (error) {
+      app.log.warn({ err: error instanceof Error ? error.message : String(error) }, "library store unavailable");
+    }
+  };
+  if (options.libraryStore) {
+    app.addHook("onReady", async () => {
+      await syncLibrary();
+      libraryTimer = setInterval(() => void syncLibrary(), options.libraryRetryMs ?? 60_000);
+      libraryTimer.unref();
+    });
+    app.addHook("onClose", async () => {
+      if (libraryTimer) clearInterval(libraryTimer);
+      libraryTimer = null;
+    });
+  }
+
+  app.get("/api/v1/pipgm/library/storage", async () => ({ ...service.libraryStorageStatus(), loaded: libraryLoaded }));
+
+  app.delete<{ Params: { itemId: string } }>("/api/v1/pipgm/items/:itemId", async (request, reply) => {
+    try {
+      const removed = await service.deleteLibraryItem(request.params.itemId);
+      if (!removed) {
+        return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+      }
+    } catch (error) {
+      return reply.code(503).send({
+        error: { code: "STORE_UNAVAILABLE", message: `The library store could not delete the files: ${error instanceof Error ? error.message : String(error)}` }
+      });
+    }
+    return reply.code(204).send();
+  });
 
   app.get("/api/v1/pipgm/feeders", async () => ({
     enabled: feeders !== null,
@@ -633,6 +679,19 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   app.get<{ Params: { assetId: string } }>("/api/v1/pipgm/assets/:assetId", async (request, reply) => {
     const asset: PiPgmAsset | undefined = service.getAsset(request.params.assetId);
+    if (asset?.stored && !asset.data && !asset.filePath) {
+      // Kept in the library store (pistorage): fetched when served.
+      let bytes: Buffer | null;
+      try {
+        bytes = await service.readStoredAsset(asset.id);
+      } catch {
+        return reply.code(503).send({ error: { code: "STORE_UNAVAILABLE", message: "The library store cannot be reached" } });
+      }
+      if (!bytes) {
+        return reply.code(404).send({ error: { code: "ASSET_NOT_FOUND", message: `The file of asset ${asset.id} is gone` } });
+      }
+      return reply.type(asset.mimeType).header("cache-control", "no-cache").send(bytes);
+    }
     if (!asset?.data && !asset?.filePath) {
       return reply.code(404).send({ error: { code: "ASSET_NOT_FOUND", message: `Unknown PiPGM asset: ${request.params.assetId}` } });
     }
