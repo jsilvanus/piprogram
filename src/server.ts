@@ -8,7 +8,7 @@
  */
 
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { PiPgmService, type PiPgmServiceOptions } from "./pipgm-service.js";
+import { MAX_AUDIO_ARM_SECONDS, PiPgmService, type PiPgmServiceOptions } from "./pipgm-service.js";
 import type {
   PiPgmAsset,
   PiPgmControlAction,
@@ -128,7 +128,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       if (!frame.ok) return invalid(reply, "INVALID_FRAME_SIZE", frame.message);
       try {
         const png = await renderFrame({
-          html: renderPiPgmStageHtml(pipeline, { transparent: frame.alpha }),
+          html: renderPiPgmStageHtml(pipeline, { transparent: frame.alpha, silent: true }),
           width: frame.width,
           height: frame.height,
           transparent: frame.alpha
@@ -280,7 +280,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   app.post<{
     Params: { pipelineId: string };
-    Body: { audioEnabled?: unknown; toggle?: unknown; volume?: unknown; sync?: unknown };
+    Body: { audioEnabled?: unknown; toggle?: unknown; volume?: unknown; armSeconds?: unknown; sync?: unknown };
   }>("/api/v1/pipgm/pipelines/:pipelineId/audio", async (request, reply) => {
     if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
     const body = request.body ?? {};
@@ -291,14 +291,89 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     if (volume !== undefined && (!Number.isFinite(volume) || volume < 0 || volume > 100)) {
       return invalid(reply, "INVALID_VOLUME", "volume must be between 0 and 100");
     }
+    const armSeconds = body.armSeconds !== undefined ? Number(body.armSeconds) : undefined;
+    if (
+      armSeconds !== undefined &&
+      (!Number.isFinite(armSeconds) || armSeconds < 1 || armSeconds > MAX_AUDIO_ARM_SECONDS)
+    ) {
+      return invalid(reply, "INVALID_ARM_SECONDS", `armSeconds must be between 1 and ${MAX_AUDIO_ARM_SECONDS}`);
+    }
     const updated = service.setAudio(request.params.pipelineId, {
       ...(typeof body.audioEnabled === "boolean" ? { audioEnabled: body.audioEnabled } : {}),
       ...(typeof body.toggle === "boolean" ? { toggle: body.toggle } : {}),
       ...(volume !== undefined ? { volume } : {}),
+      ...(armSeconds !== undefined ? { armSeconds } : {}),
       ...(typeof body.sync === "boolean" ? { sync: body.sync } : {})
     });
     return reply.code(200).send(updated);
   });
+
+  app.post<{ Params: { pipelineId: string }; Body: { itemId?: unknown; loop?: unknown; volume?: unknown } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/audio/play",
+    async (request, reply) => {
+      if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
+      const body = request.body ?? {};
+      const itemId = typeof body.itemId === "string" ? body.itemId.trim() : "";
+      if (!itemId) return invalid(reply, "ITEM_ID_REQUIRED", "itemId is required");
+      if (body.loop !== undefined && typeof body.loop !== "boolean") {
+        return invalid(reply, "INVALID_LOOP", "loop must be a boolean");
+      }
+      const volume = body.volume !== undefined ? Number(body.volume) : undefined;
+      if (volume !== undefined && (!Number.isFinite(volume) || volume < 0 || volume > 100)) {
+        return invalid(reply, "INVALID_VOLUME", "volume must be between 0 and 100");
+      }
+      const result = service.playAudio(request.params.pipelineId, {
+        itemId,
+        ...(typeof body.loop === "boolean" ? { loop: body.loop } : {}),
+        ...(volume !== undefined ? { volume } : {})
+      });
+      if (result.ok) return reply.code(200).send(result.pipeline);
+      if (result.code === "AUDIO_NOT_ARMED") {
+        return reply.code(409).send({
+          error: { code: "AUDIO_NOT_ARMED", message: "Sound is not armed on this pipeline; arm it with POST .../audio first" }
+        });
+      }
+      if (result.code === "ITEM_NOT_FOUND") {
+        return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown PiPGM item: ${itemId}` } });
+      }
+      if (result.code === "ITEM_NOT_AUDIO") {
+        return invalid(reply, "ITEM_NOT_AUDIO", `Item ${itemId} is not an audio item`);
+      }
+      return notFound(reply, request.params.pipelineId);
+    }
+  );
+
+  app.post<{ Params: { pipelineId: string } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/audio/stop",
+    async (request, reply) => {
+      if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
+      return reply.code(200).send(service.stopAudio(request.params.pipelineId));
+    }
+  );
+
+  // Kill switch: silences every pipeline, clears the tracks and disarms. Needs the API key like any write.
+  app.post("/api/v1/pipgm/audio/kill", async (_request, reply) => {
+    return reply.code(200).send({ items: service.killAudio() });
+  });
+
+  app.put<{ Params: { pipelineId: string }; Body: { itemId?: unknown } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/basic-image",
+    async (request, reply) => {
+      if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
+      const itemId = request.body?.itemId;
+      if (itemId !== null && typeof itemId !== "string") {
+        return invalid(reply, "INVALID_ITEM_ID", "itemId must be an image item id, or null to clear");
+      }
+      const result = service.setBasicImage(request.params.pipelineId, itemId);
+      if (result === "ITEM_NOT_FOUND") {
+        return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown PiPGM item: ${itemId}` } });
+      }
+      if (result === "ITEM_NOT_IMAGE") {
+        return invalid(reply, "ITEM_NOT_IMAGE", `Item ${itemId} is not an image item`);
+      }
+      return reply.code(200).send(result);
+    }
+  );
 
   app.post<{ Params: { pipelineId: string }; Body: { itemId?: unknown; cueImmediately?: unknown } }>(
     "/api/v1/pipgm/pipelines/:pipelineId/playlist",
@@ -425,8 +500,8 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     };
   }>("/api/v1/pipgm/items/media", async (request, reply) => {
     const body = request.body ?? {};
-    if (body.kind !== "video" && body.kind !== "image") {
-      return invalid(reply, "INVALID_MEDIA_KIND", "kind must be 'video' or 'image'");
+    if (body.kind !== "video" && body.kind !== "image" && body.kind !== "audio") {
+      return invalid(reply, "INVALID_MEDIA_KIND", "kind must be 'video', 'image' or 'audio'");
     }
     const filename = typeof body.filename === "string" ? body.filename.trim() : "";
     if (!filename) return invalid(reply, "FILENAME_REQUIRED", "filename is required");

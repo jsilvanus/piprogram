@@ -12,6 +12,8 @@ function escapeHtml(text: string): string {
 export interface PiPgmStageHtmlOptions {
   /** Leave the stage background out, so a screenshot of it keeps alpha (the frame route). */
   transparent?: boolean;
+  /** Never play the audio track (frame screenshots and still renders). */
+  silent?: boolean;
 }
 
 const TRANSPARENT_STYLE = `  <style>
@@ -175,6 +177,50 @@ ${options.transparent ? TRANSPARENT_STYLE : ""}</head>
 
   <script>
     let currentPipeline = ${initialJson};
+    const SILENT = ${options.silent ? "true" : "false"};
+
+    // The audio track is separate from the visual content: it lives outside #stage-content,
+    // so changing the picture never restarts the sound. A new playId starts it (with a fade-in);
+    // no track, or sound not armed, stops it at once.
+    let audioEl = null;
+    let audioPlayId = null;
+    let fadeTimer = null;
+
+    function stopAudioEl() {
+      if (fadeTimer) { clearInterval(fadeTimer); fadeTimer = null; }
+      if (audioEl) { audioEl.pause(); audioEl.removeAttribute("src"); audioEl.load(); audioEl = null; }
+      audioPlayId = null;
+    }
+
+    function fadeAudioTo(target, ms) {
+      if (!audioEl) return;
+      if (fadeTimer) { clearInterval(fadeTimer); fadeTimer = null; }
+      if (target <= audioEl.volume || ms <= 0) { audioEl.volume = target; return; }
+      const step = (target - audioEl.volume) / Math.max(1, Math.round(ms / 50));
+      fadeTimer = setInterval(() => {
+        if (!audioEl) { clearInterval(fadeTimer); fadeTimer = null; return; }
+        audioEl.volume = Math.min(target, audioEl.volume + step);
+        if (audioEl.volume >= target) { clearInterval(fadeTimer); fadeTimer = null; }
+      }, 50);
+    }
+
+    function syncAudio(state) {
+      if (SILENT) return;
+      const track = state.audioTrack;
+      if (!state.audioEnabled || !track) { stopAudioEl(); return; }
+      const target = Math.max(0, Math.min(1, (state.effectiveVolume || 0) / 100));
+      if (!audioEl || audioPlayId !== track.playId) {
+        stopAudioEl();
+        audioEl = new Audio(track.assetUrl);
+        audioEl.loop = !!track.loop;
+        audioEl.volume = 0;
+        audioPlayId = track.playId;
+        audioEl.play().catch((err) => console.warn("PiPGM audio could not start:", err));
+        fadeAudioTo(target, 1500);
+      } else {
+        fadeAudioTo(target, 200);
+      }
+    }
 
     function escapeText(str) {
       const div = document.createElement("div");
@@ -192,10 +238,14 @@ ${options.transparent ? TRANSPARENT_STYLE : ""}</head>
       document.documentElement.style.setProperty("--fade-ms", (state.fadeDurationMs || 500) + "ms");
       curtain.style.opacity = state.fadeToBlack ? "1" : "0";
       curtain.dataset.ftb = state.fadeToBlack ? "true" : "false";
+      syncAudio(state);
 
       const activeItem = state.playlist.find((i) => i.id === state.activeItemId) || null;
       if (!activeItem) {
-        content.innerHTML = "";
+        // Nothing active: the optional basic image, else black.
+        content.innerHTML = state.basicImageUrl
+          ? \`<img class="stage-image contain" src="\${escapeText(state.basicImageUrl)}" alt="" />\`
+          : "";
         return;
       }
 
@@ -271,7 +321,7 @@ ${options.transparent ? TRANSPARENT_STYLE : ""}</head>
         const vid = document.getElementById("active-video");
         if (vid) {
           vid.muted = !state.audioEnabled;
-          vid.volume = Math.max(0, Math.min(1, (state.volume ?? 100) / 100));
+          vid.volume = Math.max(0, Math.min(1, (state.effectiveVolume ?? state.volume ?? 100) / 100));
         }
         return;
       }

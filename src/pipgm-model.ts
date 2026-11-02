@@ -17,7 +17,8 @@ export type PiPgmItemKind =
   | "youtube"
   | "video"
   | "image"
-  | "hymn";
+  | "hymn"
+  | "audio";
 
 export interface PiPgmResolution {
   width: number;
@@ -157,6 +158,15 @@ export interface ImageItemData {
   caption?: string;
 }
 
+export interface AudioItemData {
+  assetId: string;
+  filename: string;
+  mimeType: string;
+  assetUrl: string;
+  durationMs?: number;
+  loop: boolean;
+}
+
 export interface HymnStanza {
   stanzaNumber: string;
   lines: string[];
@@ -194,6 +204,7 @@ export interface PiPgmItem {
   video?: VideoItemData;
   image?: ImageItemData;
   hymn?: HymnItemData;
+  audio?: AudioItemData;
 }
 
 export type PiPgmMobileSignCode =
@@ -211,6 +222,20 @@ export interface PiPgmMobileAlert {
   cuedSummary: string | null;
 }
 
+/**
+ * The audio content of a feed. It is separate from the visual content (the active item):
+ * a feed can show a slide while this plays. A video item carries its own sound and is not a track.
+ * `playId` changes on every play, so the stage page restarts the sound only for a new play.
+ */
+export interface PiPgmAudioTrack {
+  playId: string;
+  itemId: string;
+  title: string;
+  assetUrl: string;
+  loop: boolean;
+  startedAt: string;
+}
+
 export interface PiPgmPipelineSnapshot {
   id: PiPgmPipelineId;
   label: string;
@@ -220,8 +245,17 @@ export interface PiPgmPipelineSnapshot {
   state: PiPgmPipelineState;
   fadeToBlack: boolean;
   fadeDurationMs: number;
+  /** Sound is armed (allowed). Off by default; arming lasts until `audioArmedUntil`. */
   audioEnabled: boolean;
+  audioArmedUntil: string | null;
+  /** Requested volume 0-100; the stage plays `effectiveVolume`, which never exceeds `maxVolume`. */
   volume: number;
+  maxVolume: number;
+  effectiveVolume: number;
+  audioTrack: PiPgmAudioTrack | null;
+  /** Optional image item shown as the visual when nothing else is active; null = black. */
+  basicImageItemId: string | null;
+  basicImageUrl: string | null;
   linked: boolean;
   activeItemId: string | null;
   activeItemIndex: number;
@@ -260,7 +294,7 @@ export interface PiPgmAsset {
   id: string;
   filename: string;
   mimeType: string;
-  kind: "pptx" | "video" | "image" | "canva_export";
+  kind: "pptx" | "video" | "image" | "audio" | "canva_export";
   sizeBytes: number;
   createdAt: string;
   url: string;

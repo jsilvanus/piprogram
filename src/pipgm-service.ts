@@ -22,6 +22,7 @@ import {
   type HymnItemData,
   type HymnStanza,
   type PiPgmAsset,
+  type PiPgmAudioTrack,
   type PiPgmControlRequest,
   type PiPgmItem,
   type PiPgmMobileAlert,
@@ -42,6 +43,11 @@ interface PipelineInternalState {
   fadeToBlack: boolean;
   fadeDurationMs: number;
   audioEnabled: boolean;
+  /** Epoch ms when the arming ends; null while disarmed. */
+  audioArmedUntil: number | null;
+  audioArmTimer: ReturnType<typeof setTimeout> | null;
+  audioTrack: PiPgmAudioTrack | null;
+  basicImageItemId: string | null;
   volume: number;
   linked: boolean;
   activeItemId: string | null;
@@ -73,7 +79,7 @@ export interface CreateYouTubeItemInput {
 }
 
 export interface CreateUploadedMediaItemInput {
-  kind: "video" | "image";
+  kind: "video" | "image" | "audio";
   title?: string;
   filename: string;
   mimeType?: string;
@@ -115,7 +121,26 @@ export interface PiPgmServiceOptions {
   piswitchClient?: PiSwitchClient | undefined;
   autoSyncPiswitch?: boolean | undefined;
   frameRenderer?: PipgmFrameRenderer | undefined;
+  /** Highest volume (0-100) any feed plays at, whatever is requested. Default env PIPGM_AUDIO_MAX_VOLUME or 60. */
+  audioMaxVolume?: number | undefined;
+  /** How long arming lasts when the request gives no length. Default env PIPGM_AUDIO_ARM_SECONDS or 900. */
+  audioArmSeconds?: number | undefined;
+  /** Clock for tests (epoch ms). */
+  now?: (() => number) | undefined;
 }
+
+export const MAX_AUDIO_ARM_SECONDS = 3600;
+
+function numberFromEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+export type PlayAudioResult =
+  | { ok: true; pipeline: PiPgmPipelineSnapshot }
+  | { ok: false; code: "PIPELINE_NOT_FOUND" | "AUDIO_NOT_ARMED" | "ITEM_NOT_FOUND" | "ITEM_NOT_AUDIO" };
 
 export class PiPgmService {
   private readonly pipelines = new Map<PiPgmPipelineId, PipelineInternalState>();
@@ -126,12 +151,24 @@ export class PiPgmService {
   private readonly piswitchClient?: PiSwitchClient | undefined;
   private readonly autoSyncPiswitch: boolean;
   private readonly frameRenderer?: PipgmFrameRenderer | undefined;
+  private readonly audioMaxVolume: number;
+  private readonly audioArmSeconds: number;
+  private readonly now: () => number;
   private idCounter = 1;
 
   constructor(options: PiPgmServiceOptions = {}) {
     this.eventBroker = options.eventBroker;
     this.canvaConfig = options.canvaConfig ?? {};
     this.frameRenderer = options.frameRenderer;
+    this.now = options.now ?? Date.now;
+    this.audioMaxVolume = Math.max(
+      0,
+      Math.min(100, Math.round(options.audioMaxVolume ?? numberFromEnv("PIPGM_AUDIO_MAX_VOLUME") ?? 60))
+    );
+    this.audioArmSeconds = Math.max(
+      1,
+      Math.min(MAX_AUDIO_ARM_SECONDS, Math.round(options.audioArmSeconds ?? numberFromEnv("PIPGM_AUDIO_ARM_SECONDS") ?? 900))
+    );
     if (options.piswitchClient) {
       this.piswitchClient = options.piswitchClient;
     } else if (options.piswitchUrl || process.env.PISWITCH_URL) {
@@ -151,6 +188,10 @@ export class PiPgmService {
         fadeToBlack: false,
         fadeDurationMs: 500,
         audioEnabled: false, // Muted by default ("usually we work muted, but sometimes sound is required")
+        audioArmedUntil: null,
+        audioArmTimer: null,
+        audioTrack: null,
+        basicImageItemId: null,
         volume: 100,
         linked: false,
         activeItemId: null,
@@ -285,16 +326,27 @@ export class PiPgmService {
 
   setAudio(
     pipelineId: string,
-    options: { audioEnabled?: boolean; toggle?: boolean; volume?: number; sync?: boolean },
+    options: { audioEnabled?: boolean; toggle?: boolean; volume?: number; armSeconds?: number; sync?: boolean },
     isSyncedCall = false
   ): PiPgmPipelineSnapshot | undefined {
     const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
     if (!state) return undefined;
+    this.expireArming(state);
 
+    const wasArmed = state.audioEnabled;
     if (options.toggle) {
       state.audioEnabled = !state.audioEnabled;
     } else if (options.audioEnabled !== undefined) {
       state.audioEnabled = options.audioEnabled;
+    }
+
+    if (state.audioEnabled) {
+      // Arming (or re-arming with a new length) always has an end; it never lasts for ever.
+      if (!wasArmed || options.armSeconds !== undefined) {
+        this.armUntil(state, options.armSeconds ?? this.audioArmSeconds);
+      }
+    } else {
+      this.disarm(state);
     }
 
     if (options.volume !== undefined) {
@@ -311,7 +363,8 @@ export class PiPgmService {
             peer.id,
             {
               audioEnabled: state.audioEnabled,
-              volume: state.volume
+              volume: state.volume,
+              ...(state.audioEnabled && options.armSeconds !== undefined ? { armSeconds: options.armSeconds } : {})
             },
             true
           );
@@ -320,6 +373,113 @@ export class PiPgmService {
     }
 
     return snapshot;
+  }
+
+  /** Start an audio library item as the feed's audio content. Refused unless the feed is armed. */
+  playAudio(
+    pipelineId: string,
+    options: { itemId: string; loop?: boolean; volume?: number }
+  ): PlayAudioResult {
+    const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
+    if (!state) return { ok: false, code: "PIPELINE_NOT_FOUND" };
+    this.expireArming(state);
+    if (!state.audioEnabled) return { ok: false, code: "AUDIO_NOT_ARMED" };
+    const item = this.library.get(options.itemId);
+    if (!item) return { ok: false, code: "ITEM_NOT_FOUND" };
+    if (item.kind !== "audio" || !item.audio) return { ok: false, code: "ITEM_NOT_AUDIO" };
+
+    if (options.volume !== undefined) {
+      state.volume = Math.max(0, Math.min(100, Math.round(options.volume)));
+    }
+    state.audioTrack = {
+      playId: this.nextId("play"),
+      itemId: item.id,
+      title: item.title,
+      assetUrl: item.audio.assetUrl,
+      loop: options.loop ?? item.audio.loop,
+      startedAt: new Date(this.now()).toISOString()
+    };
+    const snapshot = this.toSnapshot(state);
+    this.emitPipelineEvent("audio:play", snapshot);
+    return { ok: true, pipeline: snapshot };
+  }
+
+  /** Stop the audio track of one feed. The feed stays armed. */
+  stopAudio(pipelineId: string): PiPgmPipelineSnapshot | undefined {
+    const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
+    if (!state) return undefined;
+    state.audioTrack = null;
+    const snapshot = this.toSnapshot(state);
+    this.emitPipelineEvent("audio:stop", snapshot);
+    return snapshot;
+  }
+
+  /**
+   * Kill switch: on every feed, stop the track, disarm and mute at once. Video items on a feed
+   * go silent too, because they play only while the feed is armed.
+   */
+  killAudio(): PiPgmPipelineSnapshot[] {
+    const results: PiPgmPipelineSnapshot[] = [];
+    for (const state of this.pipelines.values()) {
+      state.audioTrack = null;
+      state.audioEnabled = false;
+      this.disarm(state);
+      const snapshot = this.toSnapshot(state);
+      this.emitPipelineEvent("audio:kill", snapshot);
+      results.push(snapshot);
+    }
+    return results;
+  }
+
+  /** Choose (or clear with null) the optional basic image: an image library item shown when nothing else is active. */
+  setBasicImage(pipelineId: string, itemId: string | null): PiPgmPipelineSnapshot | "ITEM_NOT_FOUND" | "ITEM_NOT_IMAGE" | undefined {
+    const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
+    if (!state) return undefined;
+    if (itemId !== null) {
+      const item = this.library.get(itemId);
+      if (!item) return "ITEM_NOT_FOUND";
+      if (item.kind !== "image" || !item.image) return "ITEM_NOT_IMAGE";
+    }
+    state.basicImageItemId = itemId;
+    const snapshot = this.toSnapshot(state);
+    this.emitPipelineEvent("basic-image", snapshot);
+    return snapshot;
+  }
+
+  private armUntil(state: PipelineInternalState, seconds: number): void {
+    const clamped = Math.max(1, Math.min(MAX_AUDIO_ARM_SECONDS, Math.round(seconds)));
+    this.clearArmTimer(state);
+    state.audioArmedUntil = this.now() + clamped * 1000;
+    const timer = setTimeout(() => {
+      state.audioArmTimer = null;
+      if (this.expireArming(state)) {
+        this.emitPipelineEvent("audio:expired", this.toSnapshot(state));
+      }
+    }, clamped * 1000 + 50); // a little late, so the clock has passed the end
+    timer.unref();
+    state.audioArmTimer = timer;
+  }
+
+  private disarm(state: PipelineInternalState): void {
+    this.clearArmTimer(state);
+    state.audioEnabled = false;
+    state.audioArmedUntil = null;
+    state.audioTrack = null;
+  }
+
+  private clearArmTimer(state: PipelineInternalState): void {
+    if (state.audioArmTimer) {
+      clearTimeout(state.audioArmTimer);
+      state.audioArmTimer = null;
+    }
+  }
+
+  /** Ends arming once its time is up. Returns true when it did. Also runs before reads, so a late timer cannot leave sound armed. */
+  private expireArming(state: PipelineInternalState): boolean {
+    if (!state.audioEnabled || state.audioArmedUntil === null) return false;
+    if (this.now() < state.audioArmedUntil) return false;
+    this.disarm(state);
+    return true;
   }
 
   control(
@@ -590,7 +750,7 @@ export class PiPgmService {
     const buffer = input.dataBase64 ? Buffer.from(input.dataBase64, "base64") : Buffer.alloc(0);
     const mimeType =
       input.mimeType?.trim() ||
-      (input.kind === "video" ? "video/mp4" : "image/png");
+      (input.kind === "video" ? "video/mp4" : input.kind === "audio" ? "audio/mpeg" : "image/png");
     const assetUrl = `/api/v1/pipgm/assets/${encodeURIComponent(assetId)}`;
 
     const asset: PiPgmAsset = {
@@ -608,7 +768,33 @@ export class PiPgmService {
     const title = input.title?.trim() || input.filename;
 
     const item: PiPgmItem =
-      input.kind === "video"
+      input.kind === "audio"
+        ? {
+            id: itemId,
+            title,
+            kind: "audio",
+            createdAt: asset.createdAt,
+            steps: [
+              {
+                stepIndex: 0,
+                totalSteps: 1,
+                label: title,
+                subLabel: input.filename,
+                slideNumber: 1,
+                previewText: [title],
+                assetUrl
+              }
+            ],
+            audio: {
+              assetId,
+              filename: input.filename,
+              mimeType,
+              assetUrl,
+              ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+              loop: input.loop ?? false
+            }
+          }
+        : input.kind === "video"
         ? {
             id: itemId,
             title,
@@ -958,6 +1144,7 @@ export class PiPgmService {
   }
 
   private toSnapshot(state: PipelineInternalState): PiPgmPipelineSnapshot {
+    this.expireArming(state);
     const activeIndex = state.playlist.findIndex((i) => i.id === state.activeItemId);
     const activeItem = activeIndex >= 0 ? state.playlist[activeIndex] ?? null : null;
     const totalSteps = activeItem ? activeItem.steps.length : 0;
@@ -987,7 +1174,15 @@ export class PiPgmService {
       fadeToBlack: state.fadeToBlack,
       fadeDurationMs: state.fadeDurationMs,
       audioEnabled: state.audioEnabled,
+      audioArmedUntil: state.audioArmedUntil === null ? null : new Date(state.audioArmedUntil).toISOString(),
       volume: state.volume,
+      maxVolume: this.audioMaxVolume,
+      effectiveVolume: Math.min(state.volume, this.audioMaxVolume),
+      audioTrack: state.audioTrack ? { ...state.audioTrack } : null,
+      basicImageItemId: state.basicImageItemId,
+      basicImageUrl: state.basicImageItemId
+        ? this.library.get(state.basicImageItemId)?.image?.assetUrl ?? null
+        : null,
       linked: state.linked,
       activeItemId: state.activeItemId,
       activeItemIndex: activeIndex,
@@ -1020,7 +1215,7 @@ export class PiPgmService {
       if (this.frameRenderer) {
         try {
           const png = await this.frameRenderer({
-            html: renderPiPgmStageHtml(pipeline, { transparent: true }),
+            html: renderPiPgmStageHtml(pipeline, { transparent: true, silent: true }),
             width: pipeline.resolution.width,
             height: pipeline.resolution.height,
             transparent: true
