@@ -52,6 +52,17 @@ Each of the three feeds has **visual content** (the active item, or black) and, 
 - The browser that shows the stage page must be allowed to autoplay (for Chromium: `--autoplay-policy=no-user-gesture-required`). Frame renders (`frame.png`, the piswitch sync) never play sound.
 - A non-looping track that has finished stays in the snapshot as `audioTrack` until it is stopped or the arming ends. Tests: `src/audio.test.ts`. Not tried on the Pi or with a real PA.
 
+## Publishing the feeds to MediaMTX
+
+piprogram can push PiPGM1-3 to MediaMTX itself, so pimatrix does not have to poll for pictures. Set `PIPGM_PUBLISH_RTSP_BASE` (for example `rtsp://127.0.0.1:8554`); the stream of `PiPGM1` is then `<base>/PiPGM1`, the same names pimatrix already routes. Without it nothing is published.
+
+- One long-running ffmpeg per feed reads PNG frames from stdin (`image2pipe`) and publishes H.264 over RTSP (TCP). A timer writes the current picture at `PIPGM_PUBLISH_FPS` (default 5). A slide change only swaps the picture the timer writes, so the stream never drops and there is no black gap on the HDMI side (the old route restarted ffmpeg per slide). ffmpeg restarts by itself with a growing delay if it dies; a changed output size (orientation) restarts it once.
+- A fade to black or an empty pipeline publishes a black frame, it does not take the stream down. The basic image, when set, shows as the visual of an idle feed.
+- Settings: `PIPGM_PUBLISH_RTSP_BASE`, `PIPGM_PUBLISH_FPS` (1-30), `PIPGM_PUBLISH_ENCODER` (`libx264` default, or `h264_v4l2m2m` for the Pi hardware encoder), `PIPGM_FFMPEG` (binary). `GET /api/v1/pipgm/feeders` (CLI `piprogram feeders`) shows each feed's state.
+- **The picture only.** The published stream has no audio track. Sound on a feed is a separate piece of work (the live route).
+- **Do not run two publishers.** Turn pimatrix's own PiPGM publishing off (`PIMATRIX_PIPGM_FEED=publish-off`) before enabling this, or both fight for the same stream names.
+- Video and embedded items show only their still frame here; moving content needs the live route. Tests: `src/feeder.test.ts` (fake ffmpeg); the PNG frames and the picture swap were checked against a real ffmpeg once. Not tried against MediaMTX or on the Pi.
+
 ## Generated client and CLI
 
 `src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`pnpm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3200`) and `PIPGM_API_KEY`.

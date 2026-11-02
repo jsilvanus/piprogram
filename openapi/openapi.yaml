@@ -322,6 +322,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/feeders:
+    get:
+      operationId: getFeeders
+      tags: [Pipelines]
+      description: >
+        State of the feed publishers. When PIPGM_PUBLISH_RTSP_BASE is set, piprogram itself publishes PiPGM1-3 to
+        MediaMTX (one long-running ffmpeg per feed, stream name = pipeline id) and swaps pictures without restarting it.
+        `enabled` is false when publishing is off.
+      responses:
+        "200":
+          description: Publisher state per feed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  feeds:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        running:
+                          type: boolean
+                        width:
+                          type: integer
+                          nullable: true
+                        height:
+                          type: integer
+                          nullable: true
+                        restarts:
+                          type: integer
+                        lastError:
+                          type: string
+                          nullable: true
   /api/v1/pipgm/audio/kill:
     post:
       operationId: killAudio
