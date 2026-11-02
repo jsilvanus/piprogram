@@ -341,6 +341,74 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Pipeline"
+  /api/v1/pipgm/tts/prepare:
+    post:
+      operationId: prepareSpeech
+      tags: [Items]
+      description: >
+        Render a phrase to a WAV ahead of time and keep it as an audio library item; play it later with
+        audio/play. The same text and voice return the same item (200, cached) without rendering again.
+        Limits: PIPGM_TTS_MAX_CHARS (500), PIPGM_TTS_MAX_SECONDS (60), PIPGM_AUDIO_MAX_BYTES (20 MB), and the
+        oldest prepared phrases are dropped beyond PIPGM_TTS_MAX_ITEMS (50) / PIPGM_TTS_MAX_TOTAL_BYTES (100 MB).
+        One render runs at a time. 503 TTS_NOT_CONFIGURED until Piper is set up (PIPGM_TTS_MODEL_DIR).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                voice:
+                  type: string
+                  description: Voice name, a model file in PIPGM_TTS_MODEL_DIR without extension (default PIPGM_TTS_VOICE)
+                title:
+                  type: string
+      responses:
+        "200":
+          description: Already prepared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  item:
+                    $ref: "#/components/schemas/Item"
+                  cached:
+                    type: boolean
+        "201":
+          description: Prepared now
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  item:
+                    $ref: "#/components/schemas/Item"
+                  cached:
+                    type: boolean
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "429":
+          description: Too many phrases waiting (TTS_BUSY)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: The engine failed or returned no usable WAV (TTS_FAILED, TTS_BAD_AUDIO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Text to speech is not set up (TTS_NOT_CONFIGURED)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /api/v1/pipgm/pipelines/{pipelineId}/basic-image:
     put:
       operationId: setPipelineBasicImage

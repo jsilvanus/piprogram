@@ -29,6 +29,7 @@ const USAGE = `Usage: piprogram <command>
   pipelines audio-play <pipelineId> <itemId> [--loop] [--volume n]
   pipelines audio-stop <pipelineId>
   pipelines basic-image <pipelineId> <itemId|none>
+  tts prepare <text> [--voice name]   (render a phrase to a WAV ahead of time; prints the audio item id)
   audio kill   (silence and disarm every pipeline)
   pipelines orientation <pipelineId> <landscape|portrait>
   pipelines playlist add <pipelineId> <itemId> [--cue]
@@ -180,6 +181,20 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       if (!rest[1]) throw new Error("itemId (or none) is required");
       await PipelinesService.setPipelineBasicImage(id, { itemId: rest[1] === "none" ? null : rest[1] });
       io.out(`${id}: basic image ${rest[1]}`);
+      return 0;
+    }
+    if (group === "tts" && action === "prepare") {
+      const text = rest.filter((a, i) => !a.startsWith("--") && rest[i - 1] !== "--voice").join(" ");
+      if (!text) throw new Error("text is required");
+      const voice = flag(rest, "--voice");
+      const res = await fetch(`${OpenAPI.BASE}/api/v1/pipgm/tts/prepare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(io.apiKey ? { Authorization: `Bearer ${io.apiKey}` } : {}) },
+        body: JSON.stringify({ text, ...(voice ? { voice } : {}) })
+      });
+      const body = (await res.json()) as { item?: { id: string }; cached?: boolean; error?: { code: string; message: string } };
+      if (!res.ok) throw new Error(`prepare failed (${res.status}): ${body.error?.code ?? ""} ${body.error?.message ?? ""}`.trim());
+      io.out(`${body.item?.id}${body.cached ? " (cached)" : ""}`);
       return 0;
     }
     if (group === "audio" && action === "kill") {
