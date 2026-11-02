@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       fastify:
-        specifier: ^5.2.0
+        specifier: ^5.2.1
         version: 5.12.7
     devDependencies:
       '@types/node':

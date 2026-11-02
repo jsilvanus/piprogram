@@ -27,7 +27,7 @@
     "typescript": "^5.9.0"
   },
   "dependencies": {
-    "fastify": "^5.2.0"
+    "fastify": "^5.2.1"
   },
   "bin": {
     "piprogram": "dist/cli-main.js"
