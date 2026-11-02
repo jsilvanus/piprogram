@@ -20,6 +20,7 @@ import type {
 } from "./pipgm-model.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmFrameRenderer } from "./frame.js";
+import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** Service instance; a new PiPgmService is created from the options when omitted. */
@@ -30,6 +31,11 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
   logger?: boolean;
   /** Renders the frame route. Defaults to headless Chromium (PIPGM_CHROMIUM). */
   frameRenderer?: PipgmFrameRenderer;
+  /**
+   * Publish the three feeds (PiPGM1-3) to MediaMTX from this process. Undefined = off.
+   * Starts when the server is ready and stops when it closes.
+   */
+  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder; fps?: number; spawn?: SpawnFeeder };
 }
 
 const FRAME_MIN_SIDE = 16;
@@ -114,6 +120,28 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
   });
 
   app.get("/health", async () => ({ status: "ok", service: "piprogram" }));
+
+  const feeders = options.publish
+    ? new PipgmFeeders({
+        service,
+        renderFrame,
+        rtspBase: options.publish.rtspBase,
+        ffmpeg: options.publish.ffmpeg,
+        encoder: options.publish.encoder,
+        fps: options.publish.fps,
+        spawn: options.publish.spawn,
+        onError: (pipelineId, message) => app.log.warn({ pipelineId, err: message }, "feed publisher")
+      })
+    : null;
+  if (feeders) {
+    app.addHook("onReady", async () => feeders.start());
+    app.addHook("onClose", async () => feeders.stop());
+  }
+
+  app.get("/api/v1/pipgm/feeders", async () => ({
+    enabled: feeders !== null,
+    feeds: feeders ? feeders.status() : {}
+  }));
 
   app.get<{ Params: { pipelineId: string } }>("/pipgm/:pipelineId/stage", async (request, reply) => {
     const pipeline = service.getPipeline(request.params.pipelineId);

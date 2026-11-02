@@ -31,6 +31,7 @@ const USAGE = `Usage: piprogram <command>
   pipelines basic-image <pipelineId> <itemId|none>
   tts prepare <text> [--voice name]   (render a phrase to a WAV ahead of time; prints the audio item id)
   audio kill   (silence and disarm every pipeline)
+  feeders   (state of the feed publishers to MediaMTX)
   pipelines orientation <pipelineId> <landscape|portrait>
   pipelines playlist add <pipelineId> <itemId> [--cue]
   pipelines playlist remove <pipelineId> <itemId>
@@ -195,6 +196,17 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const body = (await res.json()) as { item?: { id: string }; cached?: boolean; error?: { code: string; message: string } };
       if (!res.ok) throw new Error(`prepare failed (${res.status}): ${body.error?.code ?? ""} ${body.error?.message ?? ""}`.trim());
       io.out(`${body.item?.id}${body.cached ? " (cached)" : ""}`);
+      return 0;
+    }
+    if (group === "feeders" && !action) {
+      const state = await PipelinesService.getFeeders();
+      if (!state.enabled) {
+        io.out("publishing is off (set PIPGM_PUBLISH_RTSP_BASE)");
+        return 0;
+      }
+      for (const [id, feed] of Object.entries(state.feeds ?? {})) {
+        io.out(`${id}: ${feed.running ? "running" : "down"} ${feed.width ?? "-"}x${feed.height ?? "-"} restarts ${feed.restarts ?? 0}${feed.lastError ? ` (${feed.lastError})` : ""}`);
+      }
       return 0;
     }
     if (group === "audio" && action === "kill") {
