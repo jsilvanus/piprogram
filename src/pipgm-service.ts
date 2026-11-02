@@ -33,6 +33,8 @@ import {
   type PiPgmPlaybackState,
   type PptxAnimationEffect
 } from "./pipgm-model.js";
+import { createTtsEngineFromEnv, readWavInfo, VOICE_NAME, type TtsEngine } from "./tts.js";
+import { createHash } from "node:crypto";
 import { buildPptxSteps, parsePptxPresentation } from "./pptx-adapter.js";
 
 interface PipelineInternalState {
@@ -127,6 +129,46 @@ export interface PiPgmServiceOptions {
   audioArmSeconds?: number | undefined;
   /** Clock for tests (epoch ms). */
   now?: (() => number) | undefined;
+  /** Text to speech engine; default Piper from PIPGM_TTS_* (undefined = TTS off, prepare answers 503). */
+  ttsEngine?: TtsEngine | undefined;
+  /** Longest text for one prepared phrase (default env PIPGM_TTS_MAX_CHARS or 500). */
+  ttsMaxChars?: number | undefined;
+  /** Longest prepared phrase in seconds (default env PIPGM_TTS_MAX_SECONDS or 60). */
+  ttsMaxSeconds?: number | undefined;
+  /** Largest audio file in bytes, for prepared WAVs and uploaded audio (default env PIPGM_AUDIO_MAX_BYTES or 20 MB). */
+  audioMaxBytes?: number | undefined;
+  /** Prepared phrases kept; the oldest is dropped beyond this (default env PIPGM_TTS_MAX_ITEMS or 50). */
+  ttsMaxItems?: number | undefined;
+  /** Total bytes of prepared phrases kept (default env PIPGM_TTS_MAX_TOTAL_BYTES or 100 MB). */
+  ttsMaxTotalBytes?: number | undefined;
+}
+
+export type PrepareSpeechErrorCode =
+  | "TEXT_REQUIRED"
+  | "TEXT_TOO_LONG"
+  | "INVALID_VOICE"
+  | "TTS_NOT_CONFIGURED"
+  | "TTS_BUSY"
+  | "TTS_FAILED"
+  | "TTS_BAD_AUDIO"
+  | "TTS_TOO_LONG"
+  | "TTS_TOO_LARGE";
+
+export type PrepareSpeechResult =
+  | { ok: true; item: PiPgmItem; cached: boolean }
+  | { ok: false; code: PrepareSpeechErrorCode; message: string };
+
+interface PreparedSpeech {
+  itemId: string;
+  assetId: string;
+  bytes: number;
+}
+
+const MAX_TTS_WAITING = 3;
+
+function positiveFromEnv(name: string, fallback: number): number {
+  const value = numberFromEnv(name);
+  return value !== undefined && value > 0 ? value : fallback;
 }
 
 export const MAX_AUDIO_ARM_SECONDS = 3600;
@@ -151,6 +193,15 @@ export class PiPgmService {
   private readonly piswitchClient?: PiSwitchClient | undefined;
   private readonly autoSyncPiswitch: boolean;
   private readonly frameRenderer?: PipgmFrameRenderer | undefined;
+  private readonly ttsEngine: TtsEngine | undefined;
+  readonly ttsMaxChars: number;
+  readonly ttsMaxSeconds: number;
+  readonly audioMaxBytes: number;
+  private readonly ttsMaxItems: number;
+  private readonly ttsMaxTotalBytes: number;
+  private readonly prepared = new Map<string, PreparedSpeech>();
+  private ttsTail: Promise<unknown> = Promise.resolve();
+  private ttsWaiting = 0;
   private readonly audioMaxVolume: number;
   private readonly audioArmSeconds: number;
   private readonly now: () => number;
@@ -161,6 +212,12 @@ export class PiPgmService {
     this.canvaConfig = options.canvaConfig ?? {};
     this.frameRenderer = options.frameRenderer;
     this.now = options.now ?? Date.now;
+    this.ttsEngine = "ttsEngine" in options ? options.ttsEngine : createTtsEngineFromEnv();
+    this.ttsMaxChars = Math.round(options.ttsMaxChars ?? positiveFromEnv("PIPGM_TTS_MAX_CHARS", 500));
+    this.ttsMaxSeconds = options.ttsMaxSeconds ?? positiveFromEnv("PIPGM_TTS_MAX_SECONDS", 60);
+    this.audioMaxBytes = Math.round(options.audioMaxBytes ?? positiveFromEnv("PIPGM_AUDIO_MAX_BYTES", 20 * 1024 * 1024));
+    this.ttsMaxItems = Math.round(options.ttsMaxItems ?? positiveFromEnv("PIPGM_TTS_MAX_ITEMS", 50));
+    this.ttsMaxTotalBytes = Math.round(options.ttsMaxTotalBytes ?? positiveFromEnv("PIPGM_TTS_MAX_TOTAL_BYTES", 100 * 1024 * 1024));
     this.audioMaxVolume = Math.max(
       0,
       Math.min(100, Math.round(options.audioMaxVolume ?? numberFromEnv("PIPGM_AUDIO_MAX_VOLUME") ?? 60))
@@ -429,6 +486,124 @@ export class PiPgmService {
       results.push(snapshot);
     }
     return results;
+  }
+
+  /**
+   * Render a phrase to a WAV ahead of time and keep it as an audio library item, so playing it later
+   * (audio/play) is instant. The same text and voice give the same item back without rendering again.
+   * Limits: text length, file size, length in seconds, and how many/how many bytes of prepared phrases
+   * are kept (the oldest is dropped; one that is playing is kept). One render runs at a time, so the Pi is not
+   * overloaded, and at most a few wait.
+   */
+  async prepareSpeech(input: { text: string; voice?: string | undefined; title?: string | undefined }): Promise<PrepareSpeechResult> {
+    const text = input.text.replace(/\s+/g, " ").trim();
+    if (!text) return { ok: false, code: "TEXT_REQUIRED", message: "text is required" };
+    if (text.length > this.ttsMaxChars) {
+      return { ok: false, code: "TEXT_TOO_LONG", message: `text is longer than ${this.ttsMaxChars} characters` };
+    }
+    if (input.voice !== undefined && !VOICE_NAME.test(input.voice)) {
+      return { ok: false, code: "INVALID_VOICE", message: "voice must be a plain name such as fi_FI-harri-medium" };
+    }
+    if (!this.ttsEngine) {
+      return { ok: false, code: "TTS_NOT_CONFIGURED", message: "Text to speech is not set up (PIPGM_TTS_MODEL_DIR)" };
+    }
+
+    const key = createHash("sha256").update(`${input.voice ?? ""}\n${text}`).digest("hex").slice(0, 16);
+    const hit = this.prepared.get(key);
+    const hitItem = hit ? this.library.get(hit.itemId) : undefined;
+    if (hit && hitItem) {
+      this.prepared.delete(key); // keep the newest use last, so it is dropped last
+      this.prepared.set(key, hit);
+      return { ok: true, item: structuredClone(hitItem), cached: true };
+    }
+
+    if (this.ttsWaiting >= MAX_TTS_WAITING) {
+      return { ok: false, code: "TTS_BUSY", message: "Too many phrases are being prepared; try again shortly" };
+    }
+    this.ttsWaiting += 1;
+    const engine = this.ttsEngine;
+    const run = this.ttsTail.then(async (): Promise<PrepareSpeechResult> => {
+      const again = this.prepared.get(key);
+      const againItem = again ? this.library.get(again.itemId) : undefined;
+      if (again && againItem) return { ok: true, item: structuredClone(againItem), cached: true };
+
+      let wav: Buffer;
+      try {
+        wav = await engine.synthesize(text, { voice: input.voice });
+      } catch (error) {
+        return { ok: false, code: "TTS_FAILED", message: error instanceof Error ? error.message : "synthesis failed" };
+      }
+      if (wav.length > this.audioMaxBytes) {
+        return { ok: false, code: "TTS_TOO_LARGE", message: `the rendered file is larger than ${this.audioMaxBytes} bytes` };
+      }
+      const info = readWavInfo(wav);
+      if (!info || info.durationMs <= 0) {
+        return { ok: false, code: "TTS_BAD_AUDIO", message: "the engine did not return a usable WAV" };
+      }
+      if (info.durationMs > this.ttsMaxSeconds * 1000) {
+        return { ok: false, code: "TTS_TOO_LONG", message: `the rendered speech is longer than ${this.ttsMaxSeconds} seconds` };
+      }
+
+      const item = this.createUploadedMediaItem({
+        kind: "audio",
+        title: input.title?.trim() || text.slice(0, 60),
+        filename: `tts-${key}.wav`,
+        mimeType: "audio/wav",
+        dataBase64: wav.toString("base64"),
+        durationMs: info.durationMs
+      });
+      this.prepared.set(key, { itemId: item.id, assetId: item.audio!.assetId, bytes: wav.length });
+      this.evictPrepared(item.id);
+      return { ok: true, item, cached: false };
+    });
+    this.ttsTail = run.catch(() => undefined);
+    try {
+      return await run;
+    } finally {
+      this.ttsWaiting -= 1;
+    }
+  }
+
+  /**
+   * Checks an uploaded audio file against the same limits as prepared speech: size, and for a WAV a valid header
+   * and a length of at most ttsMaxSeconds. Other formats (mp3 and so on) are only size-checked, and their length is not known.
+   */
+  checkAudioUpload(buffer: Buffer, mimeType: string, filename: string):
+    | { ok: true; durationMs?: number }
+    | { ok: false; code: "AUDIO_TOO_LARGE" | "INVALID_WAV" | "AUDIO_TOO_LONG"; message: string } {
+    if (buffer.length > this.audioMaxBytes) {
+      return { ok: false, code: "AUDIO_TOO_LARGE", message: `audio files can be at most ${this.audioMaxBytes} bytes` };
+    }
+    const isWav = /wav/i.test(mimeType) || /\.wav$/i.test(filename);
+    if (!isWav) return { ok: true };
+    const info = readWavInfo(buffer);
+    if (!info || info.durationMs <= 0) {
+      return { ok: false, code: "INVALID_WAV", message: "the file is not a usable PCM WAV" };
+    }
+    if (info.durationMs > this.ttsMaxSeconds * 1000) {
+      return { ok: false, code: "AUDIO_TOO_LONG", message: `WAV files can be at most ${this.ttsMaxSeconds} seconds` };
+    }
+    return { ok: true, durationMs: info.durationMs };
+  }
+
+  /** Drops the oldest prepared phrases beyond the count and byte limits. Never the one just made or one that is playing. */
+  private evictPrepared(keepItemId: string): void {
+    const playing = new Set<string>();
+    for (const state of this.pipelines.values()) {
+      if (state.audioTrack) playing.add(state.audioTrack.itemId);
+    }
+    const total = (): number => [...this.prepared.values()].reduce((sum, p) => sum + p.bytes, 0);
+    for (const [key, entry] of this.prepared) {
+      if (this.prepared.size <= this.ttsMaxItems && total() <= this.ttsMaxTotalBytes) break;
+      if (entry.itemId === keepItemId || playing.has(entry.itemId)) continue;
+      this.prepared.delete(key);
+      this.library.delete(entry.itemId);
+      this.assets.delete(entry.assetId);
+      for (const state of this.pipelines.values()) {
+        state.playlist = state.playlist.filter((i) => i.id !== entry.itemId);
+        if (state.activeItemId === entry.itemId) state.activeItemId = null;
+      }
+    }
   }
 
   /** Choose (or clear with null) the optional basic image: an image library item shown when nothing else is active. */

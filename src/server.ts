@@ -356,6 +356,27 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     return reply.code(200).send({ items: service.killAudio() });
   });
 
+  // Render a phrase to a WAV ahead of time; play it later with audio/play. Needs the API key like any write.
+  app.post<{ Body: { text?: unknown; voice?: unknown; title?: unknown } }>("/api/v1/pipgm/tts/prepare", async (request, reply) => {
+    const body = request.body ?? {};
+    if (typeof body.text !== "string") return invalid(reply, "TEXT_REQUIRED", "text is required");
+    if (body.voice !== undefined && typeof body.voice !== "string") {
+      return invalid(reply, "INVALID_VOICE", "voice must be a string");
+    }
+    const result = await service.prepareSpeech({
+      text: body.text,
+      ...(typeof body.voice === "string" ? { voice: body.voice } : {}),
+      ...(typeof body.title === "string" ? { title: body.title } : {})
+    });
+    if (result.ok) return reply.code(result.cached ? 200 : 201).send({ item: result.item, cached: result.cached });
+    const status =
+      result.code === "TTS_NOT_CONFIGURED" ? 503
+      : result.code === "TTS_BUSY" ? 429
+      : result.code === "TTS_FAILED" || result.code === "TTS_BAD_AUDIO" ? 502
+      : 422;
+    return reply.code(status).send({ error: { code: result.code, message: result.message } });
+  });
+
   app.put<{ Params: { pipelineId: string }; Body: { itemId?: unknown } }>(
     "/api/v1/pipgm/pipelines/:pipelineId/basic-image",
     async (request, reply) => {
@@ -508,6 +529,18 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     if (body.targetPipelineId !== undefined && !isPipelineId(service, body.targetPipelineId)) {
       return invalid(reply, "INVALID_PIPELINE_ID", "targetPipelineId must be PiPGM1, PiPGM2, or PiPGM3");
     }
+    let checkedDurationMs: number | undefined;
+    if (body.kind === "audio") {
+      const audio = Buffer.from(typeof body.dataBase64 === "string" ? body.dataBase64 : "", "base64");
+      const mime = typeof body.mimeType === "string" ? body.mimeType : "";
+      const checked = service.checkAudioUpload(audio, mime, filename);
+      if (!checked.ok) {
+        return reply.code(checked.code === "AUDIO_TOO_LARGE" ? 413 : 422).send({
+          error: { code: checked.code, message: checked.message }
+        });
+      }
+      checkedDurationMs = checked.durationMs;
+    }
     const item = service.createUploadedMediaItem({
       kind: body.kind,
       filename,
@@ -516,7 +549,11 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       ...(typeof body.dataBase64 === "string" ? { dataBase64: body.dataBase64 } : {}),
       ...(body.fit === "contain" || body.fit === "cover" ? { fit: body.fit } : {}),
       ...(typeof body.caption === "string" ? { caption: body.caption } : {}),
-      ...(typeof body.durationMs === "number" ? { durationMs: body.durationMs } : {}),
+      ...(checkedDurationMs !== undefined
+        ? { durationMs: checkedDurationMs }
+        : typeof body.durationMs === "number"
+          ? { durationMs: body.durationMs }
+          : {}),
       ...(typeof body.autoplay === "boolean" ? { autoplay: body.autoplay } : {}),
       ...(typeof body.loop === "boolean" ? { loop: body.loop } : {}),
       ...(typeof body.targetPipelineId === "string" ? { targetPipelineId: body.targetPipelineId as PiPgmPipelineId } : {}),
