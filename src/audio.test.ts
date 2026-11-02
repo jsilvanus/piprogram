@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { existsSync } from "node:fs";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PiPgmService } from "./pipgm-service.js";
 import { buildPipgmServer } from "./server.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
@@ -365,5 +369,89 @@ test("HTTP: prepare route, WAV upload limits and the CLI-facing error codes", as
     assert.equal(hugeWav.json().error.code, "AUDIO_TOO_LARGE");
   } finally {
     await app.close();
+  }
+});
+
+// --- disk cache for prepared speech ---
+
+test("prepared phrases are cached on disk and found again after a restart without rendering", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "piprogram-cache-"));
+  try {
+    const fake = fakeEngine(2);
+    const first = new PiPgmService({ ttsEngine: fake.engine, cacheDir: dir });
+    const made = await first.prepareSpeech({ text: "Kirkko on auki" });
+    assert.ok(made.ok);
+    assert.equal(first.getAsset(made.item.audio!.assetId)!.data, undefined, "not held in memory");
+    assert.ok(existsSync(join(dir, "tts", `${made.item.id.replace("tts-", "")}.wav`)));
+
+    const second = new PiPgmService({ ttsEngine: fake.engine, cacheDir: dir });
+    assert.ok(second.getLibraryItem(made.item.id), "loaded from disk at start");
+    const again = await second.prepareSpeech({ text: "Kirkko on auki" });
+    assert.ok(again.ok);
+    assert.equal(again.cached, true);
+    assert.equal(again.item.id, made.item.id, "ids are stable across restarts");
+    assert.equal(fake.calls.length, 1, "not rendered again");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the disk cache applies the limits: the oldest phrase and its files go", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "piprogram-cache-"));
+  try {
+    const clock = { t: 1_000_000 };
+    const service = new PiPgmService({ ttsEngine: fakeEngine(1).engine, cacheDir: dir, ttsMaxItems: 1, now: () => clock.t });
+    const a = await service.prepareSpeech({ text: "yksi" });
+    clock.t += 1000;
+    const b = await service.prepareSpeech({ text: "kaksi" });
+    assert.ok(a.ok && b.ok);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual((await readdir(join(dir, "tts"))).sort(), [`${b.item.id.replace("tts-", "")}.json`, `${b.item.id.replace("tts-", "")}.wav`].sort());
+    // a restart with a smaller limit prunes too
+    const restarted = new PiPgmService({ cacheDir: dir, ttsEngine: undefined, ttsMaxItems: 1 });
+    assert.equal(restarted.getLibraryItem(a.item.id), undefined);
+    assert.ok(restarted.getLibraryItem(b.item.id));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("damaged or incomplete cache entries are ignored at start", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "piprogram-cache-"));
+  try {
+    const first = new PiPgmService({ ttsEngine: fakeEngine(1).engine, cacheDir: dir });
+    const made = await first.prepareSpeech({ text: "ehjä" });
+    assert.ok(made.ok);
+    const key = made.item.id.replace("tts-", "");
+    await writeFile(join(dir, "tts", "0123456789abcdef.json"), JSON.stringify({ key: "0123456789abcdef", bytes: 10 })); // no wav
+    await writeFile(join(dir, "tts", "garbage.json"), "{not json");
+    await writeFile(join(dir, "tts", `${key}.wav`), Buffer.from("truncated")); // size no longer matches
+    const restarted = new PiPgmService({ cacheDir: dir, ttsEngine: undefined });
+    assert.equal(restarted.listLibraryItems().length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("HTTP: a cached asset is streamed from disk and supports Range", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "piprogram-cache-"));
+  const app = buildPipgmServer({ ttsEngine: fakeEngine(1).engine, cacheDir: dir });
+  try {
+    const prepared = await app.inject({ method: "POST", url: "/api/v1/pipgm/tts/prepare", payload: { text: "kuuluuko" } });
+    const url = prepared.json().item.audio.assetUrl as string;
+    const whole = await app.inject({ method: "GET", url });
+    assert.equal(whole.statusCode, 200);
+    assert.equal(whole.headers["content-type"], "audio/wav");
+    assert.equal(whole.rawPayload.length, wavBuffer(1).length);
+    assert.equal(whole.headers["accept-ranges"], "bytes");
+    const part = await app.inject({ method: "GET", url, headers: { range: "bytes=0-43" } });
+    assert.equal(part.statusCode, 206);
+    assert.equal(part.rawPayload.length, 44);
+    assert.equal(part.headers["content-range"], `bytes 0-43/${wavBuffer(1).length}`);
+    const past = await app.inject({ method: "GET", url, headers: { range: "bytes=99999999-" } });
+    assert.equal(past.statusCode, 416);
+  } finally {
+    await app.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });

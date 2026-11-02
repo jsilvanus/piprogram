@@ -299,6 +299,8 @@ export interface PiPgmAsset {
   createdAt: string;
   url: string;
   data?: Buffer;
+  /** File on disk (prepared speech cache); served by streaming instead of being held in memory. */
+  filePath?: string;
 }
 
 export function extractYouTubeVideoId(input: string): string | null {

@@ -35,6 +35,9 @@ import {
 } from "./pipgm-model.js";
 import { createTtsEngineFromEnv, readWavInfo, VOICE_NAME, type TtsEngine } from "./tts.js";
 import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { buildPptxSteps, parsePptxPresentation } from "./pptx-adapter.js";
 
 interface PipelineInternalState {
@@ -129,6 +132,11 @@ export interface PiPgmServiceOptions {
   audioArmSeconds?: number | undefined;
   /** Clock for tests (epoch ms). */
   now?: (() => number) | undefined;
+  /**
+   * Directory for prepared speech (WAV + a small JSON per phrase). Phrases survive restarts and are streamed from disk,
+   * not held in memory. Undefined = memory only (tests). The server entry point defaults it to ./data/cache.
+   */
+  cacheDir?: string | undefined;
   /** Text to speech engine; default Piper from PIPGM_TTS_* (undefined = TTS off, prepare answers 503). */
   ttsEngine?: TtsEngine | undefined;
   /** Longest text for one prepared phrase (default env PIPGM_TTS_MAX_CHARS or 500). */
@@ -162,6 +170,17 @@ interface PreparedSpeech {
   itemId: string;
   assetId: string;
   bytes: number;
+  createdAt: string;
+}
+
+interface PreparedMeta {
+  key: string;
+  text: string;
+  voice: string | null;
+  title: string;
+  durationMs: number;
+  bytes: number;
+  createdAt: string;
 }
 
 const MAX_TTS_WAITING = 3;
@@ -200,6 +219,7 @@ export class PiPgmService {
   private readonly ttsMaxItems: number;
   private readonly ttsMaxTotalBytes: number;
   private readonly prepared = new Map<string, PreparedSpeech>();
+  private readonly ttsDir: string | undefined;
   private ttsTail: Promise<unknown> = Promise.resolve();
   private ttsWaiting = 0;
   private readonly audioMaxVolume: number;
@@ -235,6 +255,12 @@ export class PiPgmService {
       });
     }
     this.autoSyncPiswitch = options.autoSyncPiswitch ?? (this.piswitchClient !== undefined);
+
+    if (options.cacheDir) {
+      this.ttsDir = join(options.cacheDir, "tts");
+      mkdirSync(this.ttsDir, { recursive: true });
+      this.loadPrepared();
+    }
 
     for (const def of pipgmPipelineDefinitions) {
       this.pipelines.set(def.id, {
@@ -544,15 +570,29 @@ export class PiPgmService {
         return { ok: false, code: "TTS_TOO_LONG", message: `the rendered speech is longer than ${this.ttsMaxSeconds} seconds` };
       }
 
-      const item = this.createUploadedMediaItem({
-        kind: "audio",
+      const meta: PreparedMeta = {
+        key,
+        text,
+        voice: input.voice ?? null,
         title: input.title?.trim() || text.slice(0, 60),
-        filename: `tts-${key}.wav`,
-        mimeType: "audio/wav",
-        dataBase64: wav.toString("base64"),
-        durationMs: info.durationMs
-      });
-      this.prepared.set(key, { itemId: item.id, assetId: item.audio!.assetId, bytes: wav.length });
+        durationMs: info.durationMs,
+        bytes: wav.length,
+        createdAt: new Date(this.now()).toISOString()
+      };
+      let item: PiPgmItem;
+      if (this.ttsDir) {
+        try {
+          const target = join(this.ttsDir, `${key}.wav`);
+          await writeFile(`${target}.tmp`, wav);
+          await rename(`${target}.tmp`, target);
+          await writeFile(join(this.ttsDir, `${key}.json`), JSON.stringify(meta));
+        } catch (error) {
+          return { ok: false, code: "TTS_FAILED", message: `could not store the file: ${error instanceof Error ? error.message : "write failed"}` };
+        }
+        item = this.registerPrepared(meta, { filePath: join(this.ttsDir, `${key}.wav`) });
+      } else {
+        item = this.registerPrepared(meta, { data: wav });
+      }
       this.evictPrepared(item.id);
       return { ok: true, item, cached: false };
     });
@@ -586,6 +626,68 @@ export class PiPgmService {
     return { ok: true, durationMs: info.durationMs };
   }
 
+  /** Adds a prepared phrase to the library (ids are stable: the same phrase has the same ids after a restart). */
+  private registerPrepared(meta: PreparedMeta, source: { filePath: string } | { data: Buffer }): PiPgmItem {
+    const itemId = `tts-${meta.key}`;
+    const assetId = `asset-tts-${meta.key}`;
+    const assetUrl = `/api/v1/pipgm/assets/${encodeURIComponent(assetId)}`;
+    const filename = `tts-${meta.key}.wav`;
+    this.assets.set(assetId, {
+      id: assetId,
+      filename,
+      mimeType: "audio/wav",
+      kind: "audio",
+      sizeBytes: meta.bytes,
+      createdAt: meta.createdAt,
+      url: assetUrl,
+      ...source
+    });
+    const item: PiPgmItem = {
+      id: itemId,
+      title: meta.title,
+      kind: "audio",
+      createdAt: meta.createdAt,
+      steps: [
+        {
+          stepIndex: 0,
+          totalSteps: 1,
+          label: meta.title,
+          subLabel: filename,
+          slideNumber: 1,
+          previewText: [meta.title],
+          assetUrl
+        }
+      ],
+      audio: { assetId, filename, mimeType: "audio/wav", assetUrl, durationMs: meta.durationMs, loop: false }
+    };
+    this.library.set(itemId, item);
+    this.prepared.set(meta.key, { itemId, assetId, bytes: meta.bytes, createdAt: meta.createdAt });
+    return structuredClone(item);
+  }
+
+  /** Reads the cache directory at start. Entries whose files are missing or changed are ignored; the limits apply as usual. */
+  private loadPrepared(): void {
+    if (!this.ttsDir) return;
+    const metas: PreparedMeta[] = [];
+    for (const name of readdirSync(this.ttsDir)) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const meta = JSON.parse(readFileSync(join(this.ttsDir, name), "utf8")) as PreparedMeta;
+        const wavPath = join(this.ttsDir, `${meta.key}.wav`);
+        if (!/^[a-f0-9]{16}$/.test(meta.key) || name !== `${meta.key}.json`) continue;
+        if (!existsSync(wavPath) || statSync(wavPath).size !== meta.bytes) continue;
+        metas.push(meta);
+      } catch {
+        // an unreadable entry is skipped; it is cleaned up when the cache is next pruned
+      }
+    }
+    metas.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const meta of metas) {
+      this.registerPrepared(meta, { filePath: join(this.ttsDir, `${meta.key}.wav`) });
+    }
+    this.evictPrepared("");
+  }
+
   /** Drops the oldest prepared phrases beyond the count and byte limits. Never the one just made or one that is playing. */
   private evictPrepared(keepItemId: string): void {
     const playing = new Set<string>();
@@ -599,6 +701,11 @@ export class PiPgmService {
       this.prepared.delete(key);
       this.library.delete(entry.itemId);
       this.assets.delete(entry.assetId);
+      if (this.ttsDir) {
+        for (const ext of ["wav", "json", "wav.tmp"]) {
+          void rm(join(this.ttsDir, `${key}.${ext}`), { force: true }).catch(() => undefined);
+        }
+      }
       for (const state of this.pipelines.values()) {
         state.playlist = state.playlist.filter((i) => i.id !== entry.itemId);
         if (state.activeItemId === entry.itemId) state.activeItemId = null;
