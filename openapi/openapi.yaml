@@ -350,7 +350,7 @@ paths:
         audio/play. The same text and voice return the same item (200, cached) without rendering again.
         Limits: PIPGM_TTS_MAX_CHARS (500), PIPGM_TTS_MAX_SECONDS (60), PIPGM_AUDIO_MAX_BYTES (20 MB), and the
         oldest prepared phrases are dropped beyond PIPGM_TTS_MAX_ITEMS (50) / PIPGM_TTS_MAX_TOTAL_BYTES (100 MB).
-        One render runs at a time. 503 TTS_NOT_CONFIGURED until Piper is set up (PIPGM_TTS_MODEL_DIR).
+        Phrases are cached on disk (PIPGM_CACHE_DIR) and survive restarts. One render runs at a time. 503 TTS_NOT_CONFIGURED until Piper is set up (PIPGM_TTS_MODEL_DIR).
       requestBody:
         required: true
         content:

@@ -7,6 +7,8 @@
  * needs `Authorization: Bearer <key>` or `x-api-key`. Reads stay open, as in pimatrix.
  */
 
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MAX_AUDIO_ARM_SECONDS, PiPgmService, type PiPgmServiceOptions } from "./pipgm-service.js";
 import type {
@@ -603,8 +605,32 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   app.get<{ Params: { assetId: string } }>("/api/v1/pipgm/assets/:assetId", async (request, reply) => {
     const asset: PiPgmAsset | undefined = service.getAsset(request.params.assetId);
-    if (!asset?.data) {
+    if (!asset?.data && !asset?.filePath) {
       return reply.code(404).send({ error: { code: "ASSET_NOT_FOUND", message: `Unknown PiPGM asset: ${request.params.assetId}` } });
+    }
+    if (asset.filePath) {
+      // Streamed from the disk cache, with single-range support so the browser can seek and loop.
+      let size: number;
+      try {
+        size = (await stat(asset.filePath)).size;
+      } catch {
+        return reply.code(404).send({ error: { code: "ASSET_NOT_FOUND", message: `The file of asset ${asset.id} is gone` } });
+      }
+      const range = /^bytes=(\d*)-(\d*)$/.exec(String(request.headers.range ?? ""));
+      reply.type(asset.mimeType).header("cache-control", "no-cache").header("accept-ranges", "bytes");
+      if (range && (range[1] || range[2])) {
+        const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+        const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+        if (start >= size || start > end) {
+          return reply.code(416).header("content-range", `bytes */${size}`).send();
+        }
+        return reply
+          .code(206)
+          .header("content-range", `bytes ${start}-${end}/${size}`)
+          .header("content-length", end - start + 1)
+          .send(createReadStream(asset.filePath, { start, end }));
+      }
+      return reply.header("content-length", size).send(createReadStream(asset.filePath));
     }
     return reply.type(asset.mimeType).header("cache-control", "no-cache").send(asset.data);
   });
