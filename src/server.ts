@@ -189,10 +189,13 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     feeds: feeders ? feeders.status() : {}
   }));
 
-  app.get<{ Params: { pipelineId: string } }>("/pipgm/:pipelineId/stage", async (request, reply) => {
+  // The stage page is silent unless opened with ?audio=1 (the link the sound-capturing page worker uses),
+  // so a preview at a desk or a screenshot never plays the feed's sound a second time.
+  app.get<{ Params: { pipelineId: string }; Querystring: { audio?: string } }>("/pipgm/:pipelineId/stage", async (request, reply) => {
     const pipeline = service.getPipeline(request.params.pipelineId);
     if (!pipeline) return notFound(reply, request.params.pipelineId);
-    return reply.type("text/html; charset=utf-8").send(renderPiPgmStageHtml(pipeline));
+    const silent = request.query?.audio !== "1";
+    return reply.type("text/html; charset=utf-8").send(renderPiPgmStageHtml(pipeline, { silent }));
   });
 
   app.get<{ Params: { pipelineId: string }; Querystring: FrameQuery }>(

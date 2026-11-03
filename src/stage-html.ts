@@ -12,7 +12,7 @@ function escapeHtml(text: string): string {
 export interface PiPgmStageHtmlOptions {
   /** Leave the stage background out, so a screenshot of it keeps alpha (the frame route). */
   transparent?: boolean;
-  /** Never play the audio track (frame screenshots and still renders). */
+  /** Never play sound: not the audio track, and video items stay muted (frame screenshots, still renders, previews). */
   silent?: boolean;
 }
 
@@ -289,7 +289,7 @@ ${options.transparent ? TRANSPARENT_STYLE : ""}</head>
       if (activeItem.kind === "canva" && activeItem.canva) {
         if (activeItem.canva.mode === "exported_mp4" && step && step.assetUrl) {
           content.innerHTML = \`
-            <video class="stage-video" src="\${escapeText(step.assetUrl)}" autoplay \${state.audioEnabled ? "" : "muted"} playsinline></video>
+            <video class="stage-video" src="\${escapeText(step.assetUrl)}" autoplay \${(SILENT || !state.audioEnabled) ? "muted" : ""} playsinline></video>
           \`;
         } else if (activeItem.canva.mode === "exported_slides" && step && step.assetUrl) {
           content.innerHTML = \`
@@ -304,7 +304,7 @@ ${options.transparent ? TRANSPARENT_STYLE : ""}</head>
       }
 
       if (activeItem.kind === "youtube" && activeItem.youtube) {
-        const muteParam = state.audioEnabled ? "0" : "1";
+        const muteParam = (SILENT || !state.audioEnabled) ? "1" : "0";
         const autoplayParam = state.playbackState === "playing" ? "1" : "0";
         const startParam = activeItem.youtube.startSeconds || 0;
         const src = \`\${activeItem.youtube.embedUrl}?enablejsapi=1&autoplay=\${autoplayParam}&mute=\${muteParam}&start=\${startParam}&rel=0\`;
@@ -316,11 +316,11 @@ ${options.transparent ? TRANSPARENT_STYLE : ""}</head>
 
       if (activeItem.kind === "video" && activeItem.video) {
         content.innerHTML = \`
-          <video id="active-video" class="stage-video" src="\${escapeText(activeItem.video.assetUrl)}" \${state.playbackState === "playing" ? "autoplay" : ""} \${activeItem.video.loop ? "loop" : ""} \${state.audioEnabled ? "" : "muted"} playsinline></video>
+          <video id="active-video" class="stage-video" src="\${escapeText(activeItem.video.assetUrl)}" \${state.playbackState === "playing" ? "autoplay" : ""} \${activeItem.video.loop ? "loop" : ""} \${(SILENT || !state.audioEnabled) ? "muted" : ""} playsinline></video>
         \`;
         const vid = document.getElementById("active-video");
         if (vid) {
-          vid.muted = !state.audioEnabled;
+          vid.muted = SILENT || !state.audioEnabled;
           vid.volume = Math.max(0, Math.min(1, (state.effectiveVolume ?? state.volume ?? 100) / 100));
         }
         return;
