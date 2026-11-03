@@ -23,6 +23,11 @@ export interface BlobStore {
   /** The bytes, or null when the object does not exist. Throws when the store cannot be reached. */
   get(key: string): Promise<Buffer | null>;
   delete(key: string): Promise<void>;
+  /**
+   * Changes only when an existing object is meant to be used, without sending its bytes again
+   * (an empty list clears it). False when there is no such object.
+   */
+  setUseAt(key: string, useAt: string[]): Promise<boolean>;
   /** All keys under a prefix. */
   list(prefix: string): Promise<string[]>;
 }
@@ -31,6 +36,8 @@ export class MemoryBlobStore implements BlobStore {
   readonly objects = new Map<string, Buffer>();
   /** The options of the last write of each key (for tests). */
   readonly writeOptions = new Map<string, BlobPutOptions | undefined>();
+  /** Every setUseAt call that found its object, in order (for tests). */
+  readonly useAtChanges: Array<{ key: string; useAt: string[] }> = [];
   failing = false;
 
   private check(): void {
@@ -49,6 +56,13 @@ export class MemoryBlobStore implements BlobStore {
   async delete(key: string): Promise<void> {
     this.check();
     this.objects.delete(key);
+  }
+  async setUseAt(key: string, useAt: string[]): Promise<boolean> {
+    this.check();
+    if (!this.objects.has(key)) return false;
+    this.useAtChanges.push({ key, useAt });
+    this.writeOptions.set(key, { ...this.writeOptions.get(key), useAt: useAt.length ? useAt : undefined });
+    return true;
   }
   async list(prefix: string): Promise<string[]> {
     this.check();
@@ -119,6 +133,18 @@ export class PiStorageBlobStore implements BlobStore {
     if (!response.ok && response.status !== 404) throw new Error(`pistorage answered ${response.status} to a delete of ${key}`);
   }
 
+  async setUseAt(key: string, useAt: string[]): Promise<boolean> {
+    const response = await this.fetchImpl(`${this.baseUrl}/api/v1/use-at`, {
+      method: "POST",
+      headers: this.headers({ "content-type": "application/json" }),
+      body: JSON.stringify({ key, useAt: useAt.length ? useAt : null }),
+      signal: AbortSignal.timeout(this.timeoutMs)
+    });
+    if (response.status === 404) return false;
+    if (!response.ok) throw new Error(`pistorage answered ${response.status} to a date change of ${key}`);
+    return true;
+  }
+
   async list(prefix: string): Promise<string[]> {
     const response = await this.fetchImpl(`${this.baseUrl}/api/v1/objects?${new URLSearchParams({ prefix, limit: "1000" })}`, {
       headers: this.headers(),
@@ -161,10 +187,13 @@ export class LibraryPersistence {
   }
 
   /** Bytes first, then the item JSON: a listed item always has its bytes. */
-  async save(item: PiPgmItem, assets: PiPgmAsset[], expiresAt?: string): Promise<void> {
+  async save(item: PiPgmItem, assets: PiPgmAsset[], expiresAt?: string, options: { metadataOnly?: boolean } = {}): Promise<void> {
     const useAt = item.useAt?.length ? item.useAt : undefined;
     for (const asset of assets) {
-      if (asset.data) await this.store.put(this.assetKey(asset.id), asset.data, { contentType: asset.mimeType, expiresAt, useAt });
+      if (!asset.data) continue;
+      // Only the date changed: ask the store to change it in place, and send the bytes only when the store lost them.
+      if (options.metadataOnly && (await this.store.setUseAt(this.assetKey(asset.id), useAt ?? []))) continue;
+      await this.store.put(this.assetKey(asset.id), asset.data, { contentType: asset.mimeType, expiresAt, useAt });
     }
     const metas = assets.map(({ data: _data, filePath: _filePath, ...meta }) => meta);
     const entry: StoredLibraryEntry = { version: 1, item, assets: metas };
