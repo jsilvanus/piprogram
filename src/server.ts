@@ -243,6 +243,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       if (item === "ITEM_NOT_FOUND") {
         return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
       }
+      await steps.setUseAt(item.id, item.useAt ?? []);
       return item;
     } catch (error) {
       if (error instanceof UseAtError) return invalid(reply, "INVALID_USE_AT", error.message);

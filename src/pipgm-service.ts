@@ -240,7 +240,7 @@ export class PiPgmService {
   private idCounter = 1;
   private readonly libraryStore: LibraryPersistence | undefined;
   /** Items whose last write to the store failed (or is running), with the reason. Retried by flushLibrary(). */
-  private readonly unsaved = new Map<string, { assetIds: string[]; expiresAt: string | undefined; error: string | null }>();
+  private readonly unsaved = new Map<string, { assetIds: string[]; expiresAt: string | undefined; error: string | null; metadataOnly?: boolean }>();
   private readonly savedItems = new Set<string>();
 
   constructor(options: PiPgmServiceOptions = {}) {
@@ -354,9 +354,9 @@ export class PiPgmService {
   }
 
   /** Writes a library item (and its uploaded bytes) to the store. A failure is kept and retried, never dropped. */
-  private persistItem(itemId: string, assetIds: string | string[] = [], expiresAt?: string): void {
+  private persistItem(itemId: string, assetIds: string | string[] = [], expiresAt?: string, metadataOnly = false): void {
     if (!this.libraryStore) return;
-    this.unsaved.set(itemId, { assetIds: Array.isArray(assetIds) ? assetIds : [assetIds], expiresAt, error: null });
+    this.unsaved.set(itemId, { assetIds: Array.isArray(assetIds) ? assetIds : [assetIds], expiresAt, error: null, ...(metadataOnly ? { metadataOnly } : {}) });
     void this.writeItem(itemId);
   }
 
@@ -370,7 +370,7 @@ export class PiPgmService {
     }
     const assets = pending.assetIds.map((id) => this.assets.get(id)).filter((a): a is PiPgmAsset => a !== undefined);
     try {
-      await store.save(item, assets, pending.expiresAt);
+      await store.save(item, assets, pending.expiresAt, { metadataOnly: pending.metadataOnly === true });
       this.savedItems.add(itemId);
       if (this.unsaved.get(itemId) === pending) this.unsaved.delete(itemId);
     } catch (error) {
@@ -439,7 +439,8 @@ export class PiPgmService {
     const useAt = input === null ? [] : parseUseAt(input, USE_AT_ZONE);
     if (useAt.length > 0) item.useAt = useAt;
     else delete item.useAt;
-    this.persistItem(itemId, this.assetIdsOf(item), this.expiryOf(item));
+    // Once the item is in the store, only its date changes there; the page files are not sent again.
+    this.persistItem(itemId, this.assetIdsOf(item), this.expiryOf(item), this.savedItems.has(itemId));
     return structuredClone(item);
   }
 

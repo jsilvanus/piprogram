@@ -135,6 +135,23 @@ export class StepImages {
     await this.store.put(this.key(item, orientation, step, true), jpg, { contentType: "image/jpeg", ...(item.useAt?.length ? { useAt: item.useAt } : {}) });
   }
 
+  /**
+   * Gives the prepared pictures of an item (all orientations and versions) a new date in the
+   * store without sending them again. Never throws: a store problem only means that the
+   * pictures keep their old date, and new ones carry the item's date.
+   */
+  async setUseAt(itemId: string, useAt: string[]): Promise<number> {
+    let changed = 0;
+    try {
+      for (const key of await this.store.list(`${this.prefix}/${itemId}/`)) {
+        if (await this.store.setUseAt(key, useAt)) changed += 1;
+      }
+    } catch {
+      // see above
+    }
+    return changed;
+  }
+
   /** Which steps of an item have a prepared picture (checked against the store). */
   async steps(itemId: string, orientation: PiPgmOrientation): Promise<StepInfo[] | null> {
     const item = this.options.getItem(itemId);

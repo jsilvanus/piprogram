@@ -142,3 +142,34 @@ test("PiStorageBlobStore speaks the pistorage API with the key", async () => {
   await store.delete("p/assets/x");
   assert.equal(calls.at(-1)!.method, "DELETE");
 });
+
+test("PiStorageBlobStore changes a date in place through /use-at and reports a missing object", async () => {
+  const bodies: Array<{ url: string; auth: string | null; body: unknown }> = [];
+  const fakeFetch = (async (url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body)) as { key: string };
+    bodies.push({ url, auth: new Headers(init.headers).get("authorization"), body });
+    return body.key.endsWith("missing") ? new Response("{}", { status: 404 }) : Response.json({ key: body.key });
+  }) as unknown as typeof fetch;
+  const store = new PiStorageBlobStore({ baseUrl: "http://pi:3700/", apiKey: "k", fetch: fakeFetch });
+  assert.equal(await store.setUseAt("p/assets/a", ["2026-11-08"]), true);
+  assert.equal(await store.setUseAt("p/assets/missing", ["2026-11-08"]), false);
+  assert.equal(await store.setUseAt("p/assets/a", []), true);
+  assert.equal(bodies[0]!.url, "http://pi:3700/api/v1/use-at");
+  assert.equal(bodies[0]!.auth, "Bearer k");
+  assert.deepEqual(bodies[0]!.body, { key: "p/assets/a", useAt: ["2026-11-08"] });
+  assert.deepEqual(bodies[2]!.body, { key: "p/assets/a", useAt: null });
+});
+
+test("a date change on a saved item sends the item JSON but not the bytes again", async () => {
+  const store = new MemoryBlobStore();
+  const service = newService(store);
+  const item = service.createUploadedMediaItem({ kind: "image", filename: "a.png", dataBase64: PNG.toString("base64") });
+  await service.flushLibrary();
+  const assetKey = [...store.objects.keys()].find((k) => k.startsWith("piprogram/library/assets/"))!;
+  store.objects.set(assetKey, Buffer.from("marker")); // a re-upload would overwrite this with the real bytes
+  assert.notEqual(service.setUseAt(item.id, "2026-11-08"), "ITEM_NOT_FOUND");
+  await service.flushLibrary();
+  assert.deepEqual([...new Set(store.useAtChanges.map((c) => c.key))], [assetKey]);
+  assert.equal(store.objects.get(assetKey)!.toString(), "marker");
+  assert.deepEqual(store.writeOptions.get(assetKey)?.useAt, ["2026-11-08"]);
+});

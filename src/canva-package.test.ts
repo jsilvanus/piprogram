@@ -263,6 +263,11 @@ test("useAt: set at creation, set later, cleared, refused; every stored file and
   const pageKey = [...store.writeOptions.keys()].find((k) => k.startsWith("piprogram/library/assets/"))!;
   assert.deepEqual(store.writeOptions.get(pageKey)?.useAt, ["2026-11-15/2026-11-16", "2026-11-22T10"]);
   assert.ok((store.writeOptions.get(pageKey)?.expiresAt ?? "") > "", "the retention deadline is kept when the date changes");
+  const changedKeys = store.useAtChanges.map((c) => c.key);
+  assert.ok(changedKeys.includes(pageKey), "the page file changed its date in place, without a new upload");
+  assert.ok(changedKeys.some((k) => k.startsWith("piprogram/steps/") && k.endsWith(".png")), "the step picture too");
+  assert.ok(changedKeys.some((k) => k.startsWith("piprogram/steps/") && k.endsWith(".thumb.jpg")), "and its thumbnail");
+  assert.ok(!changedKeys.includes(`piprogram/library/items/${item.id}.json`), "the item JSON is rewritten because the date is inside it");
 
   assert.equal((await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${item.id}/use-at`, payload: { useAt: "x" } })).statusCode, 422);
   assert.equal((await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${item.id}/use-at`, payload: { useAt: 5 } })).statusCode, 422);
