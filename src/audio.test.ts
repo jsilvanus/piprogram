@@ -455,3 +455,12 @@ test("HTTP: a cached asset is streamed from disk and supports Range", async () =
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("the stage route is silent unless opened with ?audio=1", async () => {
+  const app = buildPipgmServer({ ttsEngine: undefined });
+  const quiet = await app.inject({ url: "/pipgm/PiPGM1/stage" });
+  assert.match(quiet.body, /const SILENT = true/);
+  const loud = await app.inject({ url: "/pipgm/PiPGM1/stage?audio=1" });
+  assert.match(loud.body, /const SILENT = false/);
+  await app.close();
+});

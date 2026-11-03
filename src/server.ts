@@ -20,11 +20,20 @@ import type {
 } from "./pipgm-model.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmFrameRenderer } from "./frame.js";
+import { StepImages, ffmpegThumbnailer, type Thumbnailer } from "./step-cache.js";
+import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** How often an unloaded library or unsaved items are retried against the store (default 60 s). */
   libraryRetryMs?: number | undefined;
+  /**
+   * Where prepared step pictures and thumbnails are kept (pistorage in production). Without it they are
+   * kept in memory and lost on restart.
+   */
+  stepStore?: BlobStore | undefined;
+  /** Makes a thumbnail from a PNG; default ffmpeg. For tests. */
+  thumbnailer?: Thumbnailer | undefined;
   /** Service instance; a new PiPgmService is created from the options when omitted. */
   service?: PiPgmService;
   /** API key for mutating requests. Undefined = open (development). */
@@ -123,6 +132,14 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   app.get("/health", async () => ({ status: "ok", service: "piprogram" }));
 
+  const steps = new StepImages({
+    store: options.stepStore ?? new MemoryBlobStore(),
+    renderFrame,
+    snapshotForStep: (itemId, step, orientation) => service.snapshotForStep(itemId, step, orientation),
+    getItem: (itemId) => service.getLibraryItem(itemId),
+    thumbnailer: options.thumbnailer ?? ffmpegThumbnailer(options.publish?.ffmpeg)
+  });
+
   const feeders = options.publish
     ? new PipgmFeeders({
         service,
@@ -132,6 +149,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         encoder: options.publish.encoder,
         fps: options.publish.fps,
         spawn: options.publish.spawn,
+        steps,
         onError: (pipelineId, message) => app.log.warn({ pipelineId, err: message }, "feed publisher")
       })
     : null;
@@ -181,18 +199,78 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         error: { code: "STORE_UNAVAILABLE", message: `The library store could not delete the files: ${error instanceof Error ? error.message : String(error)}` }
       });
     }
+    void steps.remove(request.params.itemId);
     return reply.code(204).send();
   });
+
+  // ---- Prepared step pictures ------------------------------------------------
+  const orientationOf = (value: unknown): PiPgmOrientation | null =>
+    value === undefined || value === "landscape" ? "landscape" : value === "portrait" ? "portrait" : null;
+
+  app.get<{ Params: { itemId: string }; Querystring: { orientation?: string } }>("/api/v1/pipgm/items/:itemId/steps", async (request, reply) => {
+    const orientation = orientationOf(request.query?.orientation);
+    if (!orientation) return invalid(reply, "INVALID_ORIENTATION", "orientation must be landscape or portrait");
+    const list = await steps.steps(request.params.itemId, orientation);
+    if (!list) {
+      return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+    }
+    const base = `/api/v1/pipgm/items/${encodeURIComponent(request.params.itemId)}/steps`;
+    return {
+      orientation,
+      prepare: steps.status(request.params.itemId, orientation),
+      steps: list.map((s) => ({
+        ...s,
+        ...(s.prepared
+          ? { imageUrl: `${base}/${s.step}/image.png?orientation=${orientation}`, thumbnailUrl: `${base}/${s.step}/thumbnail.jpg?orientation=${orientation}` }
+          : {})
+      }))
+    };
+  });
+
+  app.post<{ Params: { itemId: string }; Body: { orientation?: unknown } }>("/api/v1/pipgm/items/:itemId/prepare", async (request, reply) => {
+    const orientation = orientationOf(request.body?.orientation);
+    if (!orientation) return invalid(reply, "INVALID_ORIENTATION", "orientation must be landscape or portrait");
+    const result = steps.prepare(request.params.itemId, orientation);
+    if (result === "ITEM_NOT_FOUND") {
+      return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+    }
+    if (result === "NOT_STILL_ITEM") {
+      return reply.code(422).send({ error: { code: "NOT_STILL_ITEM", message: "Only slide, hymn, image and Canva items have step pictures" } });
+    }
+    return reply.code(202).send(result);
+  });
+
+  for (const [suffix, thumb, type] of [["image.png", false, "image/png"], ["thumbnail.jpg", true, "image/jpeg"]] as const) {
+    app.get<{ Params: { itemId: string; step: string }; Querystring: { orientation?: string } }>(
+      `/api/v1/pipgm/items/:itemId/steps/:step/${suffix}`,
+      async (request, reply) => {
+        const orientation = orientationOf(request.query?.orientation);
+        if (!orientation) return invalid(reply, "INVALID_ORIENTATION", "orientation must be landscape or portrait");
+        const step = Number(request.params.step);
+        if (!Number.isInteger(step) || step < 0) return invalid(reply, "INVALID_STEP", "step must be a whole number");
+        const bytes = thumb
+          ? await steps.thumbnail(request.params.itemId, step, orientation)
+          : await steps.image(request.params.itemId, step, orientation);
+        if (!bytes) {
+          return reply.code(404).send({ error: { code: "STEP_NOT_PREPARED", message: "That step has no prepared picture; POST .../prepare first" } });
+        }
+        return reply.type(type).header("cache-control", "no-cache").send(bytes);
+      }
+    );
+  }
 
   app.get("/api/v1/pipgm/feeders", async () => ({
     enabled: feeders !== null,
     feeds: feeders ? feeders.status() : {}
   }));
 
-  app.get<{ Params: { pipelineId: string } }>("/pipgm/:pipelineId/stage", async (request, reply) => {
+  // The stage page is silent unless opened with ?audio=1 (the link the sound-capturing page worker uses),
+  // so a preview at a desk or a screenshot never plays the feed's sound a second time.
+  app.get<{ Params: { pipelineId: string }; Querystring: { audio?: string } }>("/pipgm/:pipelineId/stage", async (request, reply) => {
     const pipeline = service.getPipeline(request.params.pipelineId);
     if (!pipeline) return notFound(reply, request.params.pipelineId);
-    return reply.type("text/html; charset=utf-8").send(renderPiPgmStageHtml(pipeline));
+    const silent = request.query?.audio !== "1";
+    return reply.type("text/html; charset=utf-8").send(renderPiPgmStageHtml(pipeline, { silent }));
   });
 
   app.get<{ Params: { pipelineId: string }; Querystring: FrameQuery }>(

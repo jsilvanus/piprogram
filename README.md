@@ -49,7 +49,7 @@ Each of the three feeds has **visual content** (the active item, or black) and, 
 - **Text to speech (prepare):** `POST /api/v1/pipgm/tts/prepare {text, voice?}` renders the phrase to a WAV ahead of time and returns it as an audio library item (CLI: `piprogram tts prepare "<text>"`); play it later with `audio/play`. The same text and voice give the same item back (200, `cached`). Engine: [Piper](https://github.com/rhasspy/piper), offline, with Finnish voices such as `fi_FI-harri-medium`; piprogram does not bundle it. Install the binary and put the voice files (`<voice>.onnx` and `<voice>.onnx.json`) in a directory, then set `PIPGM_TTS_MODEL_DIR` (and `PIPGM_TTS_VOICE`, `PIPGM_TTS_PIPER`, `PIPGM_TTS_TIMEOUT_MS`). Without `PIPGM_TTS_MODEL_DIR` the route answers 503 `TTS_NOT_CONFIGURED`. Check the licence of the voice you choose.
 - **Limits on audio files** (prepared speech and uploads alike): `PIPGM_TTS_MAX_CHARS` (500 characters of text), `PIPGM_TTS_MAX_SECONDS` (60 s; a WAV is read from its header, so an upload longer than this is refused with 422), `PIPGM_AUDIO_MAX_BYTES` (20 MB; uploads over it get 413). Prepared phrases are cached on disk in `PIPGM_CACHE_DIR` (default `./data/cache/tts`, a WAV plus a small JSON per phrase), survive restarts and are streamed from the file (with Range), not held in memory; their ids are stable (`tts-<hash>`). Beyond `PIPGM_TTS_MAX_ITEMS` (50) or `PIPGM_TTS_MAX_TOTAL_BYTES` (100 MB) the oldest is dropped (never the one that is playing). One render runs at a time and at most three wait (429 `TTS_BUSY`).
 - **Uploading WAV files:** `POST /items/media {kind:"audio", filename, mimeType:"audio/wav", dataBase64}` is the same as preparing; a valid WAV within the limits becomes an audio item with its duration. Other audio formats (mp3 and so on) are only size-checked.
-- The browser that shows the stage page must be allowed to autoplay (for Chromium: `--autoplay-policy=no-user-gesture-required`). Frame renders (`frame.png`, the piswitch sync) never play sound.
+- **The stage page is silent unless opened with `?audio=1`** (`/pipgm/:id/stage?audio=1`): no track, and video items stay muted. That is the link the page worker uses to capture a feed's sound; a preview opened at a desk, a frame render (`frame.png`, the piswitch sync) and the publisher's screenshots never play sound. The browser that plays it must be allowed to autoplay (for Chromium: `--autoplay-policy=no-user-gesture-required`).
 - A non-looping track that has finished stays in the snapshot as `audioTrack` until it is stopped or the arming ends. Tests: `src/audio.test.ts`. Not tried on the Pi or with a real PA.
 
 ## Publishing the feeds to MediaMTX
@@ -80,6 +80,15 @@ By default the media library (uploaded images, audio, video, .pptx files, hymns,
 - Prepared speech is not stored there: it is rebuilt from text and stays in `PIPGM_CACHE_DIR`.
 - Canva exports are links, not files, so there is nothing to keep (and no retention deadline) for them yet.
 - Not run against a real pistorage or S3; the tests use a fake store and a fake fetch.
+
+## Prepared step pictures and thumbnails
+
+For slide, hymn, image and Canva items piprogram can keep a picture and a small thumbnail of every step, so that a step going on air is read, not rendered by Chromium, and the UI has thumbnails.
+
+- `POST /api/v1/pipgm/items/{id}/prepare {orientation?}` (landscape by default) renders the steps that have no picture yet, one at a time in the background (202; poll `GET .../steps`). `GET /api/v1/pipgm/items/{id}/steps?orientation=` lists the steps with `prepared`, `imageUrl` and `thumbnailUrl`; the pictures are `.../steps/{n}/image.png` and `.../thumbnail.jpg` (320 px wide JPEG, scaled with ffmpeg, `PIPGM_FFMPEG`).
+- Pictures are stored in the same store as the library (`PIPGM_STORAGE_URL`, keys `piprogram/steps/<item>/<version>/<orientation>/<n>.png`). The version is a hash of the item's steps and the output size, so an edited item never shows an old picture; old versions are removed when a new one is prepared, and deleting the item removes its pictures. Without `PIPGM_STORAGE_URL` they are kept in memory only.
+- The feed publisher uses a prepared picture when there is one and otherwise renders as before, then keeps what it rendered for next time. Video, audio and YouTube items have no step pictures (422).
+- Thumbnails are made here, not in pistorage. Not run with a real Chromium, ffmpeg or pistorage; the tests use fakes.
 
 ## Generated client and CLI
 
