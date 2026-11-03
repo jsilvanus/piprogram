@@ -734,6 +734,15 @@ paths:
                 pageCount: { type: integer }
                 targetPipelineId: { type: string }
                 cueImmediately: { type: boolean }
+                useAt:
+                  description: >-
+                    When the presentation is meant to be used: a day (2026-11-08), an hour (2026-11-08T10), a moment
+                    (2026-11-08T10:30) or a range (2026-11-08/2026-11-10); a list or a comma separated string holds
+                    several. pistorage then has the files in the Pi cache beforehand.
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items: { type: string }
       responses:
         "201":
           description: The new item
@@ -742,7 +751,44 @@ paths:
               schema:
                 $ref: "#/components/schemas/Item"
         "422":
-          description: No design id or URL
+          description: No design id or URL, or an invalid useAt
+  /api/v1/pipgm/items/{itemId}/use-at:
+    put:
+      operationId: setItemUseAt
+      tags: [Items]
+      summary: >-
+        Set when an item is meant to be used (null clears it). The item and its files are written to the store
+        again with the date. Step pictures made earlier keep no date.
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [useAt]
+              properties:
+                useAt:
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items: { type: string }
+                    - type: "null"
+      responses:
+        "200":
+          description: The item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          description: Unknown item
+        "422":
+          description: Invalid useAt
   /api/v1/pipgm/items/{itemId}/canva/export-package:
     post:
       operationId: uploadCanvaExportPackage

@@ -130,9 +130,9 @@ export class StepImages {
   }
 
   private async save(item: PiPgmItem, orientation: PiPgmOrientation, step: number, png: Buffer): Promise<void> {
-    await this.store.put(this.key(item, orientation, step, false), png, { contentType: "image/png" });
+    await this.store.put(this.key(item, orientation, step, false), png, { contentType: "image/png", ...(item.useAt?.length ? { useAt: item.useAt } : {}) });
     const jpg = await this.thumbnailer(png);
-    await this.store.put(this.key(item, orientation, step, true), jpg, { contentType: "image/jpeg" });
+    await this.store.put(this.key(item, orientation, step, true), jpg, { contentType: "image/jpeg", ...(item.useAt?.length ? { useAt: item.useAt } : {}) });
   }
 
   /** Which steps of an item have a prepared picture (checked against the store). */

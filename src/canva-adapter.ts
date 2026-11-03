@@ -28,6 +28,8 @@ export interface CanvaPluginPushInput {
   targetPipelineId?: PiPgmPipelineId;
   cueImmediately?: boolean;
   orientation?: PiPgmOrientation;
+  /** When the presentation is meant to be used (see use-at.ts). */
+  useAt?: string | string[];
 }
 
 export function normalizeCanvaDesign(input: {

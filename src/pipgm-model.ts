@@ -207,6 +207,8 @@ export interface PiPgmItem {
   image?: ImageItemData;
   hymn?: HymnItemData;
   audio?: AudioItemData;
+  /** When the item is meant to be used (see use-at.ts): days, hours, moments, ranges. */
+  useAt?: string[];
 }
 
 export type PiPgmMobileSignCode =

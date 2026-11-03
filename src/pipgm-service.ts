@@ -1,3 +1,4 @@
+import { DEFAULT_TIMEZONE, parseUseAt } from "./use-at.js";
 import { PiSwitchClient, type SlideAdvanceResult } from "./piswitch-client.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import type { PipgmFrameRenderer } from "./frame.js";
@@ -62,6 +63,8 @@ interface PipelineInternalState {
   playlist: PiPgmItem[];
   stream: ManagedStreamSnapshot;
 }
+
+const USE_AT_ZONE = process.env.PIPGM_TIMEZONE?.trim() || DEFAULT_TIMEZONE;
 
 export interface CreateHymnItemInput {
   title: string;
@@ -417,13 +420,39 @@ export class PiPgmService {
   }
 
   /** Removes a library item, its uploaded bytes and its place in every playlist. False when unknown. */
-  async deleteLibraryItem(itemId: string): Promise<boolean> {
-    const item = this.library.get(itemId);
-    if (!item) return false;
-    const assetIds = [
+  /** The ids of the uploaded files that belong to an item. */
+  private assetIdsOf(item: PiPgmItem): string[] {
+    return [
       item.image?.assetId ?? item.audio?.assetId ?? item.video?.assetId ?? item.pptx?.assetId,
       ...(item.canva?.pages.map((p) => p.assetId) ?? [])
     ].filter((id): id is string => typeof id === "string");
+  }
+
+  /**
+   * Sets when an item is meant to be used (null or an empty list clears it) and writes the item and
+   * its files to the store again, so that pistorage can have them in the Pi cache beforehand.
+   * Throws UseAtError for a value that is not valid. Step pictures made earlier keep no date.
+   */
+  setUseAt(itemId: string, input: string | readonly string[] | null): PiPgmItem | "ITEM_NOT_FOUND" {
+    const item = this.library.get(itemId);
+    if (!item) return "ITEM_NOT_FOUND";
+    const useAt = input === null ? [] : parseUseAt(input, USE_AT_ZONE);
+    if (useAt.length > 0) item.useAt = useAt;
+    else delete item.useAt;
+    this.persistItem(itemId, this.assetIdsOf(item), this.expiryOf(item));
+    return structuredClone(item);
+  }
+
+  /** The retention deadline an item's files carry in the store (Canva pages only). */
+  private expiryOf(item: PiPgmItem): string | undefined {
+    if (item.kind !== "canva" || this.canvaRetentionDays <= 0) return undefined;
+    return new Date(this.now() + this.canvaRetentionDays * 86_400_000).toISOString();
+  }
+
+  async deleteLibraryItem(itemId: string): Promise<boolean> {
+    const item = this.library.get(itemId);
+    if (!item) return false;
+    const assetIds = this.assetIdsOf(item);
     this.library.delete(itemId);
     for (const id of assetIds) this.assets.delete(id);
     this.unsaved.delete(itemId);
@@ -1455,6 +1484,8 @@ export class PiPgmService {
       steps,
       canva: canvaData
     };
+    const useAt = parseUseAt(input.useAt, USE_AT_ZONE);
+    if (useAt.length > 0) item.useAt = useAt;
 
     this.library.set(item.id, item);
     this.persistItem(item.id);

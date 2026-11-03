@@ -14,6 +14,8 @@ export interface BlobPutOptions {
   contentType?: string | undefined;
   /** ISO 8601 deadline after which the object may be deleted (pistorage retention). */
   expiresAt?: string | undefined;
+  /** When the object is meant to be used (src/use-at.ts); pistorage then has it in the Pi cache beforehand. */
+  useAt?: string[] | undefined;
 }
 
 export interface BlobStore {
@@ -89,7 +91,8 @@ export class PiStorageBlobStore implements BlobStore {
       headers: this.headers({
         "content-type": options.contentType ?? "application/octet-stream",
         "content-length": String(data.length),
-        ...(options.expiresAt ? { "x-pistorage-expires-at": options.expiresAt } : {})
+        ...(options.expiresAt ? { "x-pistorage-expires-at": options.expiresAt } : {}),
+        ...(options.useAt?.length ? { "x-pistorage-use-at": options.useAt.join(", ") } : {})
       }),
       body: new Uint8Array(data),
       signal: AbortSignal.timeout(this.timeoutMs)
@@ -159,14 +162,16 @@ export class LibraryPersistence {
 
   /** Bytes first, then the item JSON: a listed item always has its bytes. */
   async save(item: PiPgmItem, assets: PiPgmAsset[], expiresAt?: string): Promise<void> {
+    const useAt = item.useAt?.length ? item.useAt : undefined;
     for (const asset of assets) {
-      if (asset.data) await this.store.put(this.assetKey(asset.id), asset.data, { contentType: asset.mimeType, expiresAt });
+      if (asset.data) await this.store.put(this.assetKey(asset.id), asset.data, { contentType: asset.mimeType, expiresAt, useAt });
     }
     const metas = assets.map(({ data: _data, filePath: _filePath, ...meta }) => meta);
     const entry: StoredLibraryEntry = { version: 1, item, assets: metas };
     await this.store.put(this.itemKey(item.id), Buffer.from(JSON.stringify(entry)), {
       contentType: "application/json",
-      expiresAt
+      expiresAt,
+      useAt
     });
   }
 
