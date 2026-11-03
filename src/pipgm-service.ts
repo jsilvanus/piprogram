@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { LibraryPersistence } from "./library-store.js";
 import { buildPptxSteps, parsePptxPresentation } from "./pptx-adapter.js";
 
 interface PipelineInternalState {
@@ -149,6 +150,11 @@ export interface PiPgmServiceOptions {
   ttsMaxItems?: number | undefined;
   /** Total bytes of prepared phrases kept (default env PIPGM_TTS_MAX_TOTAL_BYTES or 100 MB). */
   ttsMaxTotalBytes?: number | undefined;
+  /**
+   * Durable storage (pistorage) for uploaded media and library items. Undefined = memory only, as before.
+   * Call loadLibrary() once at start to read what was stored.
+   */
+  libraryStore?: LibraryPersistence | undefined;
 }
 
 export type PrepareSpeechErrorCode =
@@ -226,9 +232,14 @@ export class PiPgmService {
   private readonly audioArmSeconds: number;
   private readonly now: () => number;
   private idCounter = 1;
+  private readonly libraryStore: LibraryPersistence | undefined;
+  /** Items whose last write to the store failed (or is running), with the reason. Retried by flushLibrary(). */
+  private readonly unsaved = new Map<string, { assetId: string | undefined; error: string | null }>();
+  private readonly savedItems = new Set<string>();
 
   constructor(options: PiPgmServiceOptions = {}) {
     this.eventBroker = options.eventBroker;
+    this.libraryStore = options.libraryStore;
     this.canvaConfig = options.canvaConfig ?? {};
     this.frameRenderer = options.frameRenderer;
     this.now = options.now ?? Date.now;
@@ -333,6 +344,89 @@ export class PiPgmService {
   getLibraryItem(itemId: string): PiPgmItem | undefined {
     const found = this.library.get(itemId);
     return found ? structuredClone(found) : undefined;
+  }
+
+  /** Writes a library item (and its uploaded bytes) to the store. A failure is kept and retried, never dropped. */
+  private persistItem(itemId: string, assetId?: string): void {
+    if (!this.libraryStore) return;
+    this.unsaved.set(itemId, { assetId, error: null });
+    void this.writeItem(itemId);
+  }
+
+  private async writeItem(itemId: string): Promise<void> {
+    const store = this.libraryStore;
+    const pending = this.unsaved.get(itemId);
+    const item = this.library.get(itemId);
+    if (!store || !pending || !item) {
+      this.unsaved.delete(itemId);
+      return;
+    }
+    const asset = pending.assetId ? this.assets.get(pending.assetId) : undefined;
+    try {
+      await store.save(item, asset);
+      this.savedItems.add(itemId);
+      if (this.unsaved.get(itemId) === pending) this.unsaved.delete(itemId);
+    } catch (error) {
+      pending.error = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Retries every item that is not stored yet. Returns how many are still unsaved. */
+  async flushLibrary(): Promise<number> {
+    await Promise.all([...this.unsaved.keys()].map((id) => this.writeItem(id)));
+    return this.unsaved.size;
+  }
+
+  libraryStorageStatus(): { enabled: boolean; stored: number; unsaved: Array<{ itemId: string; error: string | null }> } {
+    return {
+      enabled: this.libraryStore !== undefined,
+      stored: this.savedItems.size,
+      unsaved: [...this.unsaved].map(([itemId, v]) => ({ itemId, error: v.error }))
+    };
+  }
+
+  /**
+   * Reads the stored library at start. Asset bytes stay in the store and are fetched when served.
+   * Items already present (prepared speech) are kept. Returns the number of items loaded.
+   */
+  async loadLibrary(onSkip?: (key: string, reason: string) => void): Promise<number> {
+    if (!this.libraryStore) return 0;
+    const entries = await this.libraryStore.loadAll(onSkip);
+    let maxId = this.idCounter - 1;
+    for (const entry of entries) {
+      this.library.set(entry.item.id, entry.item);
+      this.savedItems.add(entry.item.id);
+      if (entry.asset) this.assets.set(entry.asset.id, { ...entry.asset, stored: true });
+      for (const id of [entry.item.id, entry.asset?.id ?? ""]) {
+        const n = /-(\d+)$/.exec(id);
+        if (n) maxId = Math.max(maxId, Number(n[1]));
+      }
+    }
+    this.idCounter = maxId + 1;
+    return entries.length;
+  }
+
+  /** The bytes of an asset kept in the store (null: not there). */
+  async readStoredAsset(assetId: string): Promise<Buffer | null> {
+    return this.libraryStore ? this.libraryStore.readAsset(assetId) : null;
+  }
+
+  /** Removes a library item, its uploaded bytes and its place in every playlist. False when unknown. */
+  async deleteLibraryItem(itemId: string): Promise<boolean> {
+    const item = this.library.get(itemId);
+    if (!item) return false;
+    const assetId = item.image?.assetId ?? item.audio?.assetId ?? item.video?.assetId ?? item.pptx?.assetId;
+    this.library.delete(itemId);
+    if (assetId) this.assets.delete(assetId);
+    this.unsaved.delete(itemId);
+    this.savedItems.delete(itemId);
+    for (const state of this.pipelines.values()) {
+      state.playlist = state.playlist.filter((i) => i.id !== itemId);
+      if (state.activeItemId === itemId) state.activeItemId = null;
+      if (state.basicImageItemId === itemId) state.basicImageItemId = null;
+    }
+    await this.libraryStore?.remove(itemId, assetId);
+    return true;
   }
 
   getAsset(assetId: string): PiPgmAsset | undefined {
@@ -971,6 +1065,7 @@ export class PiPgmService {
     };
 
     this.library.set(item.id, item);
+    this.persistItem(item.id);
 
     if (input.targetPipelineId) {
       this.addItemToPipeline(input.targetPipelineId, item.id, input.cueImmediately ?? true);
@@ -1018,6 +1113,7 @@ export class PiPgmService {
     };
 
     this.library.set(item.id, item);
+    this.persistItem(item.id);
 
     if (input.targetPipelineId) {
       this.addItemToPipeline(input.targetPipelineId, item.id, input.cueImmediately ?? true);
@@ -1130,6 +1226,7 @@ export class PiPgmService {
           };
 
     this.library.set(item.id, item);
+    this.persistItem(item.id, assetId);
 
     if (input.targetPipelineId) {
       this.addItemToPipeline(input.targetPipelineId, item.id, input.cueImmediately ?? true);
@@ -1176,6 +1273,7 @@ export class PiPgmService {
     };
 
     this.library.set(item.id, item);
+    this.persistItem(item.id, assetId);
 
     if (input.targetPipelineId) {
       this.addItemToPipeline(input.targetPipelineId, item.id, input.cueImmediately ?? true);
@@ -1321,6 +1419,7 @@ export class PiPgmService {
     };
 
     this.library.set(item.id, item);
+    this.persistItem(item.id);
 
     if (input.targetPipelineId && this.isValidPipelineId(input.targetPipelineId)) {
       if (input.orientation) {
@@ -1379,6 +1478,7 @@ export class PiPgmService {
 
     item.steps = buildCanvaSteps(item.canva);
     this.syncLibraryItemToPlaylists(item);
+    this.persistItem(itemId);
     return structuredClone(item);
   }
 

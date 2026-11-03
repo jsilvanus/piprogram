@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { LibraryPersistence, PiStorageBlobStore } from "./library-store.js";
 import { buildPipgmServer } from "./server.js";
 import type { FeederEncoder } from "./feeder.js";
 
@@ -25,7 +26,16 @@ async function main(): Promise<void> {
   if (fps !== undefined && (!Number.isInteger(fps) || fps < 1 || fps > 30)) {
     throw new Error("PIPGM_PUBLISH_FPS must be a whole number from 1 to 30");
   }
+  // The media library is kept in pistorage when PIPGM_STORAGE_URL is set; otherwise it is memory only.
+  const storageUrl = process.env.PIPGM_STORAGE_URL?.trim();
+  const libraryStore = storageUrl
+    ? new LibraryPersistence(
+        new PiStorageBlobStore({ baseUrl: storageUrl, apiKey: process.env.PIPGM_STORAGE_API_KEY?.trim() || undefined }),
+        process.env.PIPGM_STORAGE_PREFIX?.trim() || "piprogram/library"
+      )
+    : undefined;
   const app = buildPipgmServer({
+    ...(libraryStore ? { libraryStore } : {}),
     apiKey,
     logger: true,
     cacheDir,

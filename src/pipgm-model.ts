@@ -301,6 +301,8 @@ export interface PiPgmAsset {
   data?: Buffer;
   /** File on disk (prepared speech cache); served by streaming instead of being held in memory. */
   filePath?: string;
+  /** The bytes are in the library store (pistorage), fetched when served. */
+  stored?: boolean;
 }
 
 export function extractYouTubeVideoId(input: string): string | null {

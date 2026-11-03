@@ -561,6 +561,48 @@ paths:
                 $ref: "#/components/schemas/Item"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteItem
+      tags: [Items]
+      summary: Remove a library item, its uploaded files (also from the library store) and its place in every playlist
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Removed
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: The library store could not delete the files; nothing was removed from the store
+  /api/v1/pipgm/library/storage:
+    get:
+      operationId: getLibraryStorage
+      tags: [Items]
+      summary: Whether the library is kept in pistorage, whether it has been loaded, and which items are not saved yet
+      responses:
+        "200":
+          description: Storage status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, loaded, stored, unsaved]
+                properties:
+                  enabled: { type: boolean }
+                  loaded: { type: boolean }
+                  stored: { type: integer }
+                  unsaved:
+                    type: array
+                    items:
+                      type: object
+                      required: [itemId, error]
+                      properties:
+                        itemId: { type: string }
+                        error: { type: [string, "null"] }
   /api/v1/pipgm/items/hymn:
     post:
       operationId: createHymnItem
