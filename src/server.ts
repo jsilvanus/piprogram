@@ -7,6 +7,7 @@
  * needs `Authorization: Bearer <key>` or `x-api-key`. Reads stay open, as in pimatrix.
  */
 
+import { UseAtError } from "./use-at.js";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -220,9 +221,33 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
   );
 
   app.post<{ Body: Record<string, unknown> }>("/api/v1/pipgm/items/canva", async (request, reply) => {
-    const item = await service.createOrPushCanvaItem((request.body ?? {}) as never, true);
-    if (!item) return invalid(reply, "INVALID_CANVA_DESIGN", "designId or a Canva design URL is required");
-    return reply.code(201).send(item);
+    try {
+      const item = await service.createOrPushCanvaItem((request.body ?? {}) as never, true);
+      if (!item) return invalid(reply, "INVALID_CANVA_DESIGN", "designId or a Canva design URL is required");
+      return reply.code(201).send(item);
+    } catch (error) {
+      if (error instanceof UseAtError) return invalid(reply, "INVALID_USE_AT", error.message);
+      throw error;
+    }
+  });
+
+  // When an item is meant to be used (days, hours, moments, ranges: see src/use-at.ts), so that
+  // pistorage can have its files in the Pi cache beforehand. null clears it.
+  app.put<{ Params: { itemId: string }; Body: { useAt?: unknown } }>("/api/v1/pipgm/items/:itemId/use-at", async (request, reply) => {
+    const value = request.body?.useAt;
+    if (value !== null && typeof value !== "string" && !(Array.isArray(value) && value.every((v) => typeof v === "string"))) {
+      return invalid(reply, "INVALID_USE_AT", "useAt must be a string, a list of strings, or null");
+    }
+    try {
+      const item = service.setUseAt(request.params.itemId, value as string | string[] | null);
+      if (item === "ITEM_NOT_FOUND") {
+        return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+      }
+      return item;
+    } catch (error) {
+      if (error instanceof UseAtError) return invalid(reply, "INVALID_USE_AT", error.message);
+      throw error;
+    }
   });
 
   app.post<{ Params: { itemId: string }; Querystring: { orientation?: string }; Body: unknown }>(

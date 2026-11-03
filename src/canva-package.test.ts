@@ -229,3 +229,45 @@ test("a zip without images ends as a failed task with the reason", async () => {
   assert.match(String(second.task.error), /not a zip/);
   await app.close();
 });
+
+test("useAt: set at creation, set later, cleared, refused; every stored file and the step pictures carry it", async () => {
+  const store = new MemoryBlobStore();
+  const { app } = newApp(store);
+  await app.ready();
+
+  const bad = await app.inject({ method: "POST", url: "/api/v1/pipgm/items/canva", payload: { designId: "DAF123", useAt: "next sunday" } });
+  assert.equal(bad.statusCode, 422);
+  assert.equal((bad.json() as { error: { code: string } }).error.code, "INVALID_USE_AT");
+
+  const created = await app.inject({ method: "POST", url: "/api/v1/pipgm/items/canva", payload: { designId: "DAF123", title: "Esitys", useAt: "2026-11-08" } });
+  assert.equal(created.statusCode, 201);
+  const item = created.json() as { id: string; useAt: string[] };
+  assert.deepEqual(item.useAt, ["2026-11-08"]);
+
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/v1/pipgm/items/${item.id}/canva/export-package`,
+    payload: { pages: [{ filename: "p1.png", dataBase64: Buffer.from("a").toString("base64") }] }
+  });
+  await untilDone(app, (res.json() as { taskId: string }).taskId);
+  await sleep(20);
+  const written = [...store.writeOptions];
+  assert.ok(written.length >= 4, "page file, item JSON, step picture and thumbnail");
+  for (const [key, options] of written) assert.deepEqual(options?.useAt, ["2026-11-08"], key);
+
+  const changed = await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${item.id}/use-at`, payload: { useAt: ["2026-11-15/2026-11-16", "2026-11-22T10"] } });
+  assert.equal(changed.statusCode, 200);
+  assert.deepEqual((changed.json() as { useAt: string[] }).useAt, ["2026-11-15/2026-11-16", "2026-11-22T10"]);
+  await sleep(20);
+  assert.deepEqual(store.writeOptions.get(`piprogram/library/items/${item.id}.json`)?.useAt, ["2026-11-15/2026-11-16", "2026-11-22T10"]);
+  const pageKey = [...store.writeOptions.keys()].find((k) => k.startsWith("piprogram/library/assets/"))!;
+  assert.deepEqual(store.writeOptions.get(pageKey)?.useAt, ["2026-11-15/2026-11-16", "2026-11-22T10"]);
+  assert.ok((store.writeOptions.get(pageKey)?.expiresAt ?? "") > "", "the retention deadline is kept when the date changes");
+
+  assert.equal((await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${item.id}/use-at`, payload: { useAt: "x" } })).statusCode, 422);
+  assert.equal((await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${item.id}/use-at`, payload: { useAt: 5 } })).statusCode, 422);
+  assert.equal((await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/nope/use-at`, payload: { useAt: null } })).statusCode, 404);
+  const cleared = await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${item.id}/use-at`, payload: { useAt: null } });
+  assert.equal((cleared.json() as { useAt?: string[] }).useAt, undefined);
+  await app.close();
+});
