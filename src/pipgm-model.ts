@@ -115,6 +115,8 @@ export interface CanvaPage {
   title?: string;
   durationMs?: number;
   assetUrl?: string;
+  /** The library asset holding this page's exported image, when it was delivered as a package. */
+  assetId?: string;
 }
 
 export interface CanvaItemData {

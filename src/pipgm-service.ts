@@ -38,7 +38,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { LibraryPersistence } from "./library-store.js";
+import { assetsOfEntry, LibraryPersistence } from "./library-store.js";
 import { buildPptxSteps, parsePptxPresentation } from "./pptx-adapter.js";
 
 interface PipelineInternalState {
@@ -144,6 +144,8 @@ export interface PiPgmServiceOptions {
   ttsMaxChars?: number | undefined;
   /** Longest prepared phrase in seconds (default env PIPGM_TTS_MAX_SECONDS or 60). */
   ttsMaxSeconds?: number | undefined;
+  /** Days an exported Canva package is kept in the library store (default env PIPGM_CANVA_RETENTION_DAYS or 60; 0 = forever). */
+  canvaRetentionDays?: number | undefined;
   /** Largest audio file in bytes, for prepared WAVs and uploaded audio (default env PIPGM_AUDIO_MAX_BYTES or 20 MB). */
   audioMaxBytes?: number | undefined;
   /** Prepared phrases kept; the oldest is dropped beyond this (default env PIPGM_TTS_MAX_ITEMS or 50). */
@@ -229,17 +231,19 @@ export class PiPgmService {
   private ttsTail: Promise<unknown> = Promise.resolve();
   private ttsWaiting = 0;
   private readonly audioMaxVolume: number;
+  private readonly canvaRetentionDays: number;
   private readonly audioArmSeconds: number;
   private readonly now: () => number;
   private idCounter = 1;
   private readonly libraryStore: LibraryPersistence | undefined;
   /** Items whose last write to the store failed (or is running), with the reason. Retried by flushLibrary(). */
-  private readonly unsaved = new Map<string, { assetId: string | undefined; error: string | null }>();
+  private readonly unsaved = new Map<string, { assetIds: string[]; expiresAt: string | undefined; error: string | null }>();
   private readonly savedItems = new Set<string>();
 
   constructor(options: PiPgmServiceOptions = {}) {
     this.eventBroker = options.eventBroker;
     this.libraryStore = options.libraryStore;
+    this.canvaRetentionDays = Math.max(0, options.canvaRetentionDays ?? numberFromEnv("PIPGM_CANVA_RETENTION_DAYS") ?? 60);
     this.canvaConfig = options.canvaConfig ?? {};
     this.frameRenderer = options.frameRenderer;
     this.now = options.now ?? Date.now;
@@ -347,9 +351,9 @@ export class PiPgmService {
   }
 
   /** Writes a library item (and its uploaded bytes) to the store. A failure is kept and retried, never dropped. */
-  private persistItem(itemId: string, assetId?: string): void {
+  private persistItem(itemId: string, assetIds: string | string[] = [], expiresAt?: string): void {
     if (!this.libraryStore) return;
-    this.unsaved.set(itemId, { assetId, error: null });
+    this.unsaved.set(itemId, { assetIds: Array.isArray(assetIds) ? assetIds : [assetIds], expiresAt, error: null });
     void this.writeItem(itemId);
   }
 
@@ -361,9 +365,9 @@ export class PiPgmService {
       this.unsaved.delete(itemId);
       return;
     }
-    const asset = pending.assetId ? this.assets.get(pending.assetId) : undefined;
+    const assets = pending.assetIds.map((id) => this.assets.get(id)).filter((a): a is PiPgmAsset => a !== undefined);
     try {
-      await store.save(item, asset);
+      await store.save(item, assets, pending.expiresAt);
       this.savedItems.add(itemId);
       if (this.unsaved.get(itemId) === pending) this.unsaved.delete(itemId);
     } catch (error) {
@@ -396,8 +400,9 @@ export class PiPgmService {
     for (const entry of entries) {
       this.library.set(entry.item.id, entry.item);
       this.savedItems.add(entry.item.id);
-      if (entry.asset) this.assets.set(entry.asset.id, { ...entry.asset, stored: true });
-      for (const id of [entry.item.id, entry.asset?.id ?? ""]) {
+      const entryAssets = assetsOfEntry(entry);
+      for (const asset of entryAssets) this.assets.set(asset.id, { ...asset, stored: true });
+      for (const id of [entry.item.id, ...entryAssets.map((a) => a.id)]) {
         const n = /-(\d+)$/.exec(id);
         if (n) maxId = Math.max(maxId, Number(n[1]));
       }
@@ -415,9 +420,12 @@ export class PiPgmService {
   async deleteLibraryItem(itemId: string): Promise<boolean> {
     const item = this.library.get(itemId);
     if (!item) return false;
-    const assetId = item.image?.assetId ?? item.audio?.assetId ?? item.video?.assetId ?? item.pptx?.assetId;
+    const assetIds = [
+      item.image?.assetId ?? item.audio?.assetId ?? item.video?.assetId ?? item.pptx?.assetId,
+      ...(item.canva?.pages.map((p) => p.assetId) ?? [])
+    ].filter((id): id is string => typeof id === "string");
     this.library.delete(itemId);
-    if (assetId) this.assets.delete(assetId);
+    for (const id of assetIds) this.assets.delete(id);
     this.unsaved.delete(itemId);
     this.savedItems.delete(itemId);
     for (const state of this.pipelines.values()) {
@@ -425,7 +433,7 @@ export class PiPgmService {
       if (state.activeItemId === itemId) state.activeItemId = null;
       if (state.basicImageItemId === itemId) state.basicImageItemId = null;
     }
-    await this.libraryStore?.remove(itemId, assetId);
+    await this.libraryStore?.remove(itemId, assetIds);
     return true;
   }
 
@@ -1471,6 +1479,64 @@ export class PiPgmService {
     }
 
     return this.getLibraryItem(item.id) ?? null;
+  }
+
+  /** True when the item is stored in the library store (or there is no store, so nothing to wait for). */
+  isItemSaved(itemId: string): boolean {
+    return !this.libraryStore || (this.savedItems.has(itemId) && !this.unsaved.has(itemId));
+  }
+
+  /**
+   * Replaces a Canva item's pages with delivered images (an export package): each becomes a library
+   * asset, the item shows them as slides, and the files get a retention deadline in the store.
+   */
+  attachCanvaPages(
+    itemId: string,
+    pages: Array<{ pageNumber: number; filename: string; mimeType: string; data: Buffer }>
+  ): PiPgmItem | "ITEM_NOT_FOUND" | "NOT_CANVA_ITEM" {
+    const item = this.library.get(itemId);
+    if (!item) return "ITEM_NOT_FOUND";
+    if (item.kind !== "canva" || !item.canva) return "NOT_CANVA_ITEM";
+    const oldIds = item.canva.pages.map((p) => p.assetId).filter((id): id is string => typeof id === "string");
+    for (const id of oldIds) this.assets.delete(id);
+    const createdAt = new Date().toISOString();
+    const newIds: string[] = [];
+    const canvaPages = pages.map((page) => {
+      const assetId = this.nextId("asset");
+      newIds.push(assetId);
+      const url = `/api/v1/pipgm/assets/${encodeURIComponent(assetId)}`;
+      this.assets.set(assetId, {
+        id: assetId,
+        filename: page.filename,
+        mimeType: page.mimeType,
+        kind: "canva_export",
+        sizeBytes: page.data.length,
+        createdAt,
+        url,
+        data: page.data
+      });
+      return { pageNumber: page.pageNumber, title: page.filename.replace(/\.[^.]+$/, ""), assetUrl: url, assetId };
+    });
+    item.canva.pages = canvaPages;
+    item.canva.pageCount = canvaPages.length;
+    item.canva.mode = "exported_slides";
+    item.canva.exportJob = {
+      jobId: `canva-package-${this.now()}`,
+      status: "completed",
+      format: "png",
+      quality: item.canva.exportJob.quality,
+      downloadUrls: [],
+      localAssetUrls: canvaPages.map((p) => p.assetUrl),
+      updatedAt: createdAt,
+      error: null
+    };
+    item.steps = buildCanvaSteps(item.canva);
+    this.syncLibraryItemToPlaylists(item);
+    const expiresAt = this.canvaRetentionDays > 0 ? new Date(this.now() + this.canvaRetentionDays * 86_400_000).toISOString() : undefined;
+    this.savedItems.delete(itemId);
+    this.persistItem(itemId, newIds, expiresAt);
+    for (const id of oldIds) void this.libraryStore?.removeAssets([id]).catch(() => undefined);
+    return structuredClone(item);
   }
 
   async exportCanvaItem(

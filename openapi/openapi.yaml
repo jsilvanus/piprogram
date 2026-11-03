@@ -715,6 +715,91 @@ paths:
           description: JPEG
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/items/canva:
+    post:
+      operationId: createCanvaItem
+      tags: [Items]
+      summary: Create or push a Canva item (designId or a Canva design URL; optional pages and export links)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                designId: { type: string }
+                title: { type: string }
+                embedUrl: { type: string }
+                editUrl: { type: string }
+                pageCount: { type: integer }
+                targetPipelineId: { type: string }
+                cueImmediately: { type: boolean }
+      responses:
+        "201":
+          description: The new item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "422":
+          description: No design id or URL
+  /api/v1/pipgm/items/{itemId}/canva/export-package:
+    post:
+      operationId: uploadCanvaExportPackage
+      tags: [Items]
+      summary: >-
+        Deliver the exported pages of a Canva item as a zip (Content-Type application/zip) or as JSON
+        {pages:[{filename, mimeType?, pageNumber?, dataBase64}]}. Answers 202 with a task at once; the work
+        (unpacking, saving the pages with a retention deadline, preparing a picture and a thumbnail of each
+        step) runs in the background. Poll the task.
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: orientation
+          description: landscape, portrait or both separated by a comma (default landscape)
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema: { type: string, format: binary }
+          application/json:
+            schema: { type: object }
+      responses:
+        "202":
+          description: Accepted. The Location header is the task URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackageTask"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A package for this item is still being processed
+        "422":
+          description: Not a Canva item, or the body is not a usable package
+  /api/v1/pipgm/tasks/{taskId}:
+    get:
+      operationId: getTask
+      tags: [Items]
+      summary: Progress of a package task
+      parameters:
+        - in: path
+          name: taskId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackageTask"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/pipgm/items/hymn:
     post:
       operationId: createHymnItem
@@ -949,6 +1034,31 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    PackageTask:
+      type: object
+      required: [taskId, type, itemId, state, progress, pages, pictures, orientations, saved, ready, error, startedAt, updatedAt]
+      properties:
+        taskId: { type: string }
+        type: { type: string, enum: [canva-package] }
+        itemId: { type: string }
+        state: { type: string, enum: [queued, unpacking, preparing, ready, failed] }
+        progress: { type: number, minimum: 0, maximum: 1, description: Over the whole job; never goes back. }
+        pages:
+          type: object
+          properties:
+            total: { type: integer }
+        pictures:
+          type: object
+          description: Step pictures with their thumbnails made, over all requested orientations.
+          properties:
+            done: { type: integer }
+            total: { type: integer }
+        orientations: { type: array, items: { type: string } }
+        saved: { type: boolean, description: The item and its page files are stored in the library store. Not needed for ready. }
+        ready: { type: boolean, description: The item can go on air with its pictures prepared. }
+        error: { type: [string, "null"] }
+        startedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     PipgmPipelineId:
       type: string
       enum: [PiPGM1, PiPGM2, PiPGM3]
