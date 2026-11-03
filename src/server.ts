@@ -20,6 +20,7 @@ import type {
 } from "./pipgm-model.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmFrameRenderer } from "./frame.js";
+import { CanvaPackages, imageTypeOf, numberPages } from "./canva-package.js";
 import { StepImages, ffmpegThumbnailer, type Thumbnailer } from "./step-cache.js";
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
@@ -32,6 +33,10 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
    * kept in memory and lost on restart.
    */
   stepStore?: BlobStore | undefined;
+  /** This server's own address as the screenshot browser reaches it (default http://127.0.0.1:$PIPGM_PORT). */
+  selfUrl?: string | undefined;
+  /** How often a package task looks at the picture preparation (default 100 ms). For tests. */
+  packagePollMs?: number | undefined;
   /** Makes a thumbnail from a PNG; default ffmpeg. For tests. */
   thumbnailer?: Thumbnailer | undefined;
   /** Service instance; a new PiPgmService is created from the options when omitted. */
@@ -111,7 +116,12 @@ function presentedKey(request: FastifyRequest): string | undefined {
 }
 
 export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInstance {
-  const renderFrame = options.frameRenderer ?? createChromiumFrameRenderer();
+  // The browser loads the stage page from a temporary file, so relative asset URLs (/api/v1/pipgm/assets/...)
+  // need a base that points back at this server.
+  const selfUrl = (options.selfUrl ?? `http://127.0.0.1:${process.env.PIPGM_PORT?.trim() || "3200"}`).replace(/\/+$/, "");
+  const baseFrameRenderer = options.frameRenderer ?? createChromiumFrameRenderer();
+  const renderFrame: PipgmFrameRenderer = (request) =>
+    baseFrameRenderer({ ...request, html: request.html.replace(/<head>/i, `<head>\n  <base href="${selfUrl}/">`) });
   const service = options.service ?? new PiPgmService({ frameRenderer: renderFrame, ...options });
   const app = Fastify({
     logger: options.logger ?? false,
@@ -201,6 +211,75 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     }
     void steps.remove(request.params.itemId);
     return reply.code(204).send();
+  });
+
+  // ---- Canva export packages ----------------------------------------------------
+  const packages = new CanvaPackages({ service, steps, pollMs: options.packagePollMs });
+  app.addContentTypeParser(["application/zip", "application/x-zip-compressed", "application/octet-stream"], { parseAs: "buffer" }, (_request, body, done) =>
+    done(null, body)
+  );
+
+  app.post<{ Body: Record<string, unknown> }>("/api/v1/pipgm/items/canva", async (request, reply) => {
+    const item = await service.createOrPushCanvaItem((request.body ?? {}) as never, true);
+    if (!item) return invalid(reply, "INVALID_CANVA_DESIGN", "designId or a Canva design URL is required");
+    return reply.code(201).send(item);
+  });
+
+  app.post<{ Params: { itemId: string }; Querystring: { orientation?: string }; Body: unknown }>(
+    "/api/v1/pipgm/items/:itemId/canva/export-package",
+    async (request, reply) => {
+      const orientations = String(request.query?.orientation ?? "landscape")
+        .split(",")
+        .map((o) => o.trim());
+      if (orientations.length === 0 || !orientations.every((o) => o === "landscape" || o === "portrait")) {
+        return invalid(reply, "INVALID_ORIENTATION", "orientation must be landscape, portrait or both separated by a comma");
+      }
+      let source: Parameters<typeof packages.accept>[1];
+      if (Buffer.isBuffer(request.body)) {
+        source = { zip: request.body };
+      } else {
+        const pages = (request.body as { pages?: unknown } | null)?.pages;
+        if (!Array.isArray(pages) || pages.length === 0) {
+          return invalid(reply, "INVALID_PACKAGE", "send a zip (Content-Type: application/zip) or JSON {pages:[{filename, dataBase64}]}");
+        }
+        const files: Array<{ filename: string; mimeType: string; data: Buffer }> = [];
+        for (const page of pages as Array<Record<string, unknown>>) {
+          const filename = typeof page.filename === "string" ? page.filename : "";
+          const mimeType = (typeof page.mimeType === "string" && page.mimeType) || imageTypeOf(filename);
+          if (!filename || !mimeType || !mimeType.startsWith("image/") || typeof page.dataBase64 !== "string") {
+            return invalid(reply, "INVALID_PACKAGE", "every page needs a filename, an image mimeType (or an image file extension) and dataBase64");
+          }
+          files.push({ filename, mimeType, data: Buffer.from(page.dataBase64, "base64") });
+        }
+        const numbered = numberPages(files);
+        // an explicit pageNumber on every page wins over the number found in the file name
+        const explicit = (pages as Array<Record<string, unknown>>).every((p) => Number.isInteger(p.pageNumber) && (p.pageNumber as number) > 0);
+        source = {
+          pages: explicit
+            ? (pages as Array<Record<string, unknown>>)
+                .map((p, i) => ({ ...files[i]!, filename: files[i]!.filename.split("/").pop()!, pageNumber: p.pageNumber as number }))
+                .sort((a, b) => a.pageNumber - b.pageNumber)
+            : numbered
+        };
+      }
+      const accepted = packages.accept(request.params.itemId, source, orientations as Array<"landscape" | "portrait">);
+      if (accepted === "ITEM_NOT_FOUND") {
+        return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+      }
+      if (accepted === "NOT_CANVA_ITEM") {
+        return reply.code(422).send({ error: { code: "NOT_CANVA_ITEM", message: "Only Canva items take an export package" } });
+      }
+      if (accepted === "BUSY") {
+        return reply.code(409).send({ error: { code: "PACKAGE_IN_PROGRESS", message: "A package for this item is still being processed" } });
+      }
+      return reply.code(202).header("location", `/api/v1/pipgm/tasks/${accepted.taskId}`).send(accepted);
+    }
+  );
+
+  app.get<{ Params: { taskId: string } }>("/api/v1/pipgm/tasks/:taskId", async (request, reply) => {
+    const task = packages.get(request.params.taskId);
+    if (!task) return reply.code(404).send({ error: { code: "TASK_NOT_FOUND", message: `Unknown task: ${request.params.taskId}` } });
+    return task;
   });
 
   // ---- Prepared step pictures ------------------------------------------------

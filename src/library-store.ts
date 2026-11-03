@@ -27,13 +27,16 @@ export interface BlobStore {
 
 export class MemoryBlobStore implements BlobStore {
   readonly objects = new Map<string, Buffer>();
+  /** The options of the last write of each key (for tests). */
+  readonly writeOptions = new Map<string, BlobPutOptions | undefined>();
   failing = false;
 
   private check(): void {
     if (this.failing) throw new Error("store unavailable");
   }
-  async put(key: string, data: Buffer): Promise<void> {
+  async put(key: string, data: Buffer, options?: BlobPutOptions): Promise<void> {
     this.check();
+    this.writeOptions.set(key, options);
     this.objects.set(key, Buffer.from(data));
   }
   async get(key: string): Promise<Buffer | null> {
@@ -125,10 +128,20 @@ export class PiStorageBlobStore implements BlobStore {
 }
 
 /** What is stored per item: the item, and the metadata of the asset its bytes belong to. */
+export type StoredAsset = Omit<PiPgmAsset, "data" | "filePath">;
+
 export interface StoredLibraryEntry {
   version: 1;
   item: PiPgmItem;
-  asset: Omit<PiPgmAsset, "data" | "filePath"> | null;
+  /** Every asset the item uses (a Canva package has one per page). */
+  assets?: StoredAsset[];
+  /** Entries written before an item could have several assets. */
+  asset?: StoredAsset | null;
+}
+
+/** The assets of a stored entry, old or new format. */
+export function assetsOfEntry(entry: StoredLibraryEntry): StoredAsset[] {
+  return entry.assets ?? (entry.asset ? [entry.asset] : []);
 }
 
 export class LibraryPersistence {
@@ -145,21 +158,25 @@ export class LibraryPersistence {
   }
 
   /** Bytes first, then the item JSON: a listed item always has its bytes. */
-  async save(item: PiPgmItem, asset: PiPgmAsset | undefined, expiresAt?: string): Promise<void> {
-    if (asset?.data) {
-      await this.store.put(this.assetKey(asset.id), asset.data, { contentType: asset.mimeType, expiresAt });
+  async save(item: PiPgmItem, assets: PiPgmAsset[], expiresAt?: string): Promise<void> {
+    for (const asset of assets) {
+      if (asset.data) await this.store.put(this.assetKey(asset.id), asset.data, { contentType: asset.mimeType, expiresAt });
     }
-    const { data: _data, filePath: _filePath, ...meta } = asset ?? ({} as PiPgmAsset);
-    const entry: StoredLibraryEntry = { version: 1, item, asset: asset ? meta : null };
+    const metas = assets.map(({ data: _data, filePath: _filePath, ...meta }) => meta);
+    const entry: StoredLibraryEntry = { version: 1, item, assets: metas };
     await this.store.put(this.itemKey(item.id), Buffer.from(JSON.stringify(entry)), {
       contentType: "application/json",
       expiresAt
     });
   }
 
-  async remove(itemId: string, assetId: string | undefined): Promise<void> {
+  async remove(itemId: string, assetIds: string[]): Promise<void> {
     await this.store.delete(this.itemKey(itemId));
-    if (assetId) await this.store.delete(this.assetKey(assetId));
+    for (const assetId of assetIds) await this.store.delete(this.assetKey(assetId));
+  }
+
+  async removeAssets(assetIds: string[]): Promise<void> {
+    for (const id of assetIds) await this.store.delete(this.assetKey(id));
   }
 
   async readAsset(assetId: string): Promise<Buffer | null> {

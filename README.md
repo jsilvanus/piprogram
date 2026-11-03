@@ -35,7 +35,7 @@ A host that embeds piprogram must provide objects that satisfy these interfaces.
 
 Writes need `Authorization: Bearer <key>` or `x-api-key` when a key is set. Reads stay open.
 
-Not in 1.0: the Canva routes (`/api/v1/pipgm/canva/*`, `/api/v1/pipgm/items/canva`, `items/:id/canva/export`). They come in 1.1 with the Canva integration. The effects bridge that pimatrix used for PiPGM fades and mutes is not here; a host that needs it should listen for the pipeline snapshots.
+Not in 1.0: the Canva Connect export route (`items/:id/canva/export`); the push and the export-package routes are below. The effects bridge that pimatrix used for PiPGM fades and mutes is not here; a host that needs it should listen for the pipeline snapshots.
 
 ## Audio and the basic image
 
@@ -89,6 +89,18 @@ For slide, hymn, image and Canva items piprogram can keep a picture and a small 
 - Pictures are stored in the same store as the library (`PIPGM_STORAGE_URL`, keys `piprogram/steps/<item>/<version>/<orientation>/<n>.png`). The version is a hash of the item's steps and the output size, so an edited item never shows an old picture; old versions are removed when a new one is prepared, and deleting the item removes its pictures. Without `PIPGM_STORAGE_URL` they are kept in memory only.
 - The feed publisher uses a prepared picture when there is one and otherwise renders as before, then keeps what it rendered for next time. Video, audio and YouTube items have no step pictures (422).
 - Thumbnails are made here, not in pistorage. Not run with a real Chromium, ffmpeg or pistorage; the tests use fakes.
+
+## Canva export packages
+
+The Canva side exports the pages and delivers them to piprogram, which keeps them (nothing is downloaded from Canva by piprogram).
+
+1. `POST /api/v1/pipgm/items/canva {designId|embedUrl, title, ...}` creates the Canva item (201).
+2. `POST /api/v1/pipgm/items/{id}/canva/export-package[?orientation=landscape|portrait|landscape,portrait]` delivers the pages as a zip (`Content-Type: application/zip`) or as JSON `{pages:[{filename, mimeType?, pageNumber?, dataBase64}]}`. It answers **202 with a task** (`taskId`, `Location: /api/v1/pipgm/tasks/{taskId}`) at once; the upload progress is the sender's own.
+3. `GET /api/v1/pipgm/tasks/{taskId}` reports `state` (`queued`, `unpacking`, `preparing`, `ready`, `failed`), `progress` (0 to 1, never goes back), `pages.total`, `pictures {done,total}` (a step picture with its thumbnail each, per orientation), `saved` (stored in the library store; not needed for ready), `ready` and `error`. `ready: true` means the item can go on air with its pictures prepared; thumbnails are then at `items/{id}/steps/{n}/thumbnail.jpg`.
+
+Details: pages are numbered by the last number in the file name (page-2 before page-10; else natural file order; an explicit `pageNumber` in JSON wins); folders, `__MACOSX`, dot files and non-images (png, jpg, webp) in the zip are ignored; zip64, encrypted entries, more than 300 entries, an entry over 25 MB or 250 MB unpacked are refused (the task fails with the reason). The pages become library assets and the item switches to showing them as slides; the page files and the item JSON get a retention deadline of `PIPGM_CANVA_RETENTION_DAYS` (default 60, 0 = forever) in the store, after which pistorage deletes them. A second package for the same item replaces the first (409 while one is still running). Tasks are kept in memory (the last 50 finished ones), so a restart forgets them; the item itself is stored. The request body limit is 50 MB. Not tried against the real Canva plugin.
+
+Screenshots of the stage page now carry a `<base href>` pointing at this server (`PIPGM_PORT`, or the `selfUrl` option), because the browser loads the page from a temporary file and relative asset URLs such as `/api/v1/pipgm/assets/...` did not resolve before.
 
 ## Generated client and CLI
 
