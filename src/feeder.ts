@@ -252,6 +252,8 @@ export interface PipgmFeedersOptions {
   /** How often the pipelines are looked at for a change, default 250 ms. */
   intervalMs?: number | undefined;
   spawn?: SpawnFeeder | undefined;
+  /** Prepared step pictures: read when there is one, kept after a render when there is not. */
+  steps?: { lookup(snapshot: PiPgmPipelineSnapshot): Promise<Buffer | null>; remember(snapshot: PiPgmPipelineSnapshot, png: Buffer): Promise<void> } | undefined;
   onError?: ((pipelineId: PiPgmPipelineId, message: string) => void) | undefined;
 }
 
@@ -328,14 +330,23 @@ export class PipgmFeeders {
     if (this.shown.get(id) === key) return;
     const { width, height } = snapshot.resolution;
     try {
-      const png = snapshot.fadeToBlack
-        ? solidPng(width, height)
-        : await this.options.renderFrame({
+      let png: Buffer;
+      if (snapshot.fadeToBlack) {
+        png = solidPng(width, height);
+      } else {
+        const prepared = await this.options.steps?.lookup(snapshot);
+        if (prepared) {
+          png = prepared;
+        } else {
+          png = await this.options.renderFrame({
             html: renderPiPgmStageHtml(snapshot, { transparent: false, silent: true }),
             width,
             height,
             transparent: false
           });
+          void this.options.steps?.remember(snapshot, png);
+        }
+      }
       this.feeders.get(id)!.show(png, width, height);
       this.shown.set(id, key);
     } catch (error) {

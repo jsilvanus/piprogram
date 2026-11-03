@@ -81,6 +81,15 @@ By default the media library (uploaded images, audio, video, .pptx files, hymns,
 - Canva exports are links, not files, so there is nothing to keep (and no retention deadline) for them yet.
 - Not run against a real pistorage or S3; the tests use a fake store and a fake fetch.
 
+## Prepared step pictures and thumbnails
+
+For slide, hymn, image and Canva items piprogram can keep a picture and a small thumbnail of every step, so that a step going on air is read, not rendered by Chromium, and the UI has thumbnails.
+
+- `POST /api/v1/pipgm/items/{id}/prepare {orientation?}` (landscape by default) renders the steps that have no picture yet, one at a time in the background (202; poll `GET .../steps`). `GET /api/v1/pipgm/items/{id}/steps?orientation=` lists the steps with `prepared`, `imageUrl` and `thumbnailUrl`; the pictures are `.../steps/{n}/image.png` and `.../thumbnail.jpg` (320 px wide JPEG, scaled with ffmpeg, `PIPGM_FFMPEG`).
+- Pictures are stored in the same store as the library (`PIPGM_STORAGE_URL`, keys `piprogram/steps/<item>/<version>/<orientation>/<n>.png`). The version is a hash of the item's steps and the output size, so an edited item never shows an old picture; old versions are removed when a new one is prepared, and deleting the item removes its pictures. Without `PIPGM_STORAGE_URL` they are kept in memory only.
+- The feed publisher uses a prepared picture when there is one and otherwise renders as before, then keeps what it rendered for next time. Video, audio and YouTube items have no step pictures (422).
+- Thumbnails are made here, not in pistorage. Not run with a real Chromium, ffmpeg or pistorage; the tests use fakes.
+
 ## Generated client and CLI
 
 `src/generated/` is generated from `openapi/openapi.yaml` with `openapi-typescript-codegen` (`pnpm run generate`; `prebuild` runs it, so the folder is not committed). The `piprogram` CLI (`dist/cli-main.js`) calls that client and reads `PIPGM_URL` (default `http://127.0.0.1:3200`) and `PIPGM_API_KEY`.

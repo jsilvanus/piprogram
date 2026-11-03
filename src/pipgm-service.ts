@@ -429,6 +429,36 @@ export class PiPgmService {
     return true;
   }
 
+  /**
+   * A pipeline snapshot that shows one step of a library item, built on the side: no real pipeline
+   * changes. Used to render step pictures ahead of time. Null for an unknown item or step.
+   */
+  snapshotForStep(itemId: string, step: number, orientation: PiPgmOrientation): PiPgmPipelineSnapshot | null {
+    const item = this.library.get(itemId);
+    const base = this.pipelines.get("PiPGM1");
+    if (!item || !item.steps[step] || !base) return null;
+    return this.toSnapshot({
+      id: base.id,
+      label: base.label,
+      hidden: false,
+      orientation,
+      fadeToBlack: false,
+      fadeDurationMs: 0,
+      audioEnabled: false,
+      audioArmedUntil: null,
+      audioArmTimer: null,
+      audioTrack: null,
+      basicImageItemId: null,
+      volume: 0,
+      linked: false,
+      activeItemId: item.id,
+      currentStep: step,
+      playbackState: "playing",
+      playlist: [structuredClone(item)],
+      stream: { ...base.stream }
+    });
+  }
+
   getAsset(assetId: string): PiPgmAsset | undefined {
     return this.assets.get(assetId);
   }

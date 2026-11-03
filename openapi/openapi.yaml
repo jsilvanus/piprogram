@@ -603,6 +603,118 @@ paths:
                       properties:
                         itemId: { type: string }
                         error: { type: [string, "null"] }
+  /api/v1/pipgm/items/{itemId}/steps:
+    get:
+      operationId: listItemSteps
+      tags: [Items]
+      summary: The steps of an item and which have a prepared picture (with its URLs), plus the state of the last prepare run
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: orientation
+          schema: { type: string, enum: [landscape, portrait], default: landscape }
+      responses:
+        "200":
+          description: Steps
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orientation, prepare, steps]
+                properties:
+                  orientation: { type: string }
+                  prepare:
+                    type: object
+                    required: [state, done, total, error]
+                    properties:
+                      state: { type: string, enum: [idle, running, done, failed] }
+                      done: { type: integer }
+                      total: { type: integer }
+                      error: { type: [string, "null"] }
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      required: [step, label, prepared]
+                      properties:
+                        step: { type: integer }
+                        label: { type: string }
+                        prepared: { type: boolean }
+                        imageUrl: { type: string }
+                        thumbnailUrl: { type: string }
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/items/{itemId}/prepare:
+    post:
+      operationId: prepareItemSteps
+      tags: [Items]
+      summary: Render and store a picture and a thumbnail of every step that has none yet (slide, hymn, image and Canva items), in the background
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orientation: { type: string, enum: [landscape, portrait], default: landscape }
+      responses:
+        "202":
+          description: Started (or already running); poll listItemSteps
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Not a still item, or a bad orientation
+  /api/v1/pipgm/items/{itemId}/steps/{step}/image.png:
+    get:
+      operationId: getStepImage
+      tags: [Items]
+      summary: The prepared picture of a step (404 STEP_NOT_PREPARED if there is none)
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: step
+          required: true
+          schema: { type: integer }
+        - in: query
+          name: orientation
+          schema: { type: string, enum: [landscape, portrait], default: landscape }
+      responses:
+        "200":
+          description: PNG
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/items/{itemId}/steps/{step}/thumbnail.jpg:
+    get:
+      operationId: getStepThumbnail
+      tags: [Items]
+      summary: The prepared thumbnail (320 px wide JPEG) of a step
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: step
+          required: true
+          schema: { type: integer }
+        - in: query
+          name: orientation
+          schema: { type: string, enum: [landscape, portrait], default: landscape }
+      responses:
+        "200":
+          description: JPEG
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/pipgm/items/hymn:
     post:
       operationId: createHymnItem
