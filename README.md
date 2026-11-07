@@ -112,3 +112,13 @@ The generated client reads every non-JSON body as text, so it cannot return the 
 ## Still in pimatrix
 
 Until the Pi switches over, pimatrix still mounts the old `/api/v1/pipgm/*` routes. They can go once picontrol points at this API.
+
+---
+
+## Pi Ecosystem Integration & Status Updates
+
+This project is an integral component of the [Pi Production Ecosystem](file:///d:/piecosystem).
+
+> [!IMPORTANT]
+> Any changes to this repository's architectural role, API routes, communication protocols, exposed ports, dependencies, or runtime status **must be documented in the central `piecosystem` coordination repository** (`docs/projects-catalog.md` and `docs/inter-service-matrix.md`).
+> Always verify cross-system health with `npm run status` in `D:\piecosystem`.
