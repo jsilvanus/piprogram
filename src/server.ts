@@ -673,6 +673,83 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     }
   );
 
+  // Replace or reorder the playlist atomically. Needs the API key like any write.
+  app.put<{ Params: { pipelineId: string }; Body: { itemIds?: unknown } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/playlist/order",
+    async (request, reply) => {
+      if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
+      const itemIds = request.body?.itemIds;
+      if (!Array.isArray(itemIds) || !itemIds.every((id) => typeof id === "string" && id.trim() !== "")) {
+        return invalid(reply, "INVALID_ITEM_IDS", "itemIds must be an array of item ids");
+      }
+      const result = service.setPlaylistOrder(request.params.pipelineId, itemIds as string[]);
+      if (!result) return notFound(reply, request.params.pipelineId);
+      if ("error" in result) {
+        return reply.code(422).send({
+          error: {
+            code: result.error === "UNKNOWN_ITEMS" ? "UNKNOWN_ITEMS" : "DUPLICATE_ITEMS",
+            message:
+              result.error === "UNKNOWN_ITEMS"
+                ? `Not in the library: ${result.ids.join(", ")}`
+                : `Listed more than once: ${result.ids.join(", ")}`,
+            ids: result.ids
+          }
+        });
+      }
+      return reply.code(200).send(result);
+    }
+  );
+
+  // The whole playlist as one ordered list of steps (for a "coming up" strip). Reads are open.
+  app.get<{ Params: { pipelineId: string } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/playlist/steps",
+    async (request, reply) => {
+      const pipeline = service.getPipeline(request.params.pipelineId);
+      if (!pipeline) return notFound(reply, request.params.pipelineId);
+      const out: Array<{
+        itemId: string;
+        itemIndex: number;
+        itemTitle: string;
+        itemKind: string;
+        stepIndex: number;
+        label: string;
+        thumbnailUrl: string | null;
+        isActive: boolean;
+      }> = [];
+      for (const [itemIndex, item] of pipeline.playlist.entries()) {
+        let prepared = new Map<number, boolean>();
+        try {
+          const list = await steps.steps(item.id, pipeline.orientation);
+          prepared = new Map((list ?? []).map((s) => [s.step, s.prepared]));
+        } catch {
+          // The store is down: the steps are listed without thumbnails.
+        }
+        const base = `/api/v1/pipgm/items/${encodeURIComponent(item.id)}/steps`;
+        for (const [stepIndex, step] of item.steps.entries()) {
+          out.push({
+            itemId: item.id,
+            itemIndex,
+            itemTitle: item.title,
+            itemKind: item.kind,
+            stepIndex,
+            label: step.label,
+            thumbnailUrl: prepared.get(stepIndex)
+              ? `${base}/${stepIndex}/thumbnail.jpg?orientation=${pipeline.orientation}`
+              : null,
+            isActive: pipeline.activeItemId === item.id && pipeline.currentStep === stepIndex
+          });
+        }
+      }
+      return reply.code(200).send({
+        pipelineId: pipeline.id,
+        orientation: pipeline.orientation,
+        activeItemId: pipeline.activeItemId,
+        currentStep: pipeline.currentStep,
+        steps: out
+      });
+    }
+  );
+
   app.delete<{ Params: { pipelineId: string; itemId: string } }>(
     "/api/v1/pipgm/pipelines/:pipelineId/playlist/:itemId",
     async (request, reply) => {

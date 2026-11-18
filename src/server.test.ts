@@ -101,3 +101,73 @@ test("with an API key, writes need the key and reads stay open", async () => {
     await app.close();
   }
 });
+
+test("playlist/steps lists every step of the playlist in order and marks the active one", async () => {
+  const app = buildPipgmServer();
+  try {
+    const ids: string[] = [];
+    for (const title of ["Eka", "Toka"]) {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/pipgm/items/hymn",
+        payload: { title, stanzas: [{ stanzaNumber: 1, lines: ["a"] }, { stanzaNumber: 2, lines: ["b"] }] }
+      });
+      ids.push(created.json().id as string);
+      await app.inject({ method: "POST", url: "/api/v1/pipgm/pipelines/PiPGM1/playlist", payload: { itemId: ids.at(-1) } });
+    }
+    await app.inject({ method: "POST", url: "/api/v1/pipgm/pipelines/PiPGM1/control", payload: { action: "gotoItem", itemId: ids[1] } });
+    const res = await app.inject({ method: "GET", url: "/api/v1/pipgm/pipelines/PiPGM1/playlist/steps" });
+    assert.equal(res.statusCode, 200);
+    const body = res.json();
+    assert.equal(body.pipelineId, "PiPGM1");
+    assert.equal(body.activeItemId, ids[1]);
+    const rows = body.steps as Array<{ itemId: string; itemIndex: number; stepIndex: number; thumbnailUrl: string | null; isActive: boolean }>;
+    assert.ok(rows.length >= 2);
+    assert.deepEqual([...new Set(rows.map((r) => r.itemId))], ids);
+    assert.deepEqual(rows.filter((r) => r.isActive).map((r) => [r.itemId, r.stepIndex]), [[ids[1], 0]]);
+    assert.ok(rows.every((r) => r.thumbnailUrl === null));
+    const missing = await app.inject({ method: "GET", url: "/api/v1/pipgm/pipelines/PiPGM9/playlist/steps" });
+    assert.equal(missing.statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
+
+test("playlist/order reorders, replaces and refuses unknown or repeated ids without changing anything", async () => {
+  const app = buildPipgmServer();
+  try {
+    const ids: string[] = [];
+    for (const title of ["A", "B", "C"]) {
+      const created = await app.inject({ method: "POST", url: "/api/v1/pipgm/items/hymn", payload: { title, stanzas: [{ lines: ["x"] }] } });
+      ids.push(created.json().id as string);
+    }
+    const put = (itemIds: unknown) =>
+      app.inject({ method: "PUT", url: "/api/v1/pipgm/pipelines/PiPGM1/playlist/order", payload: { itemIds } });
+    const titles = async () =>
+      ((await app.inject({ method: "GET", url: "/api/v1/pipgm/pipelines/PiPGM1" })).json().playlist as Array<{ title: string }>).map((i) => i.title);
+
+    assert.equal((await put([ids[0], ids[1]])).statusCode, 200);
+    assert.deepEqual(await titles(), ["A", "B"]);
+    // the first item is active; reordering keeps it active at step 0
+    const reordered = await put([ids[1], ids[2], ids[0]]);
+    assert.equal(reordered.json().activeItemId, ids[0]);
+    assert.deepEqual(await titles(), ["B", "C", "A"]);
+    // dropping the active item moves the active one to the first remaining
+    const dropped = await put([ids[2], ids[1]]);
+    assert.equal(dropped.json().activeItemId, ids[2]);
+
+    const unknown = await put([ids[1], "nope"]);
+    assert.equal(unknown.statusCode, 422);
+    assert.equal(unknown.json().error.code, "UNKNOWN_ITEMS");
+    const dup = await put([ids[1], ids[1]]);
+    assert.equal(dup.statusCode, 422);
+    assert.equal(dup.json().error.code, "DUPLICATE_ITEMS");
+    assert.equal((await put("x")).statusCode, 422);
+    assert.deepEqual(await titles(), ["C", "B"]);
+
+    assert.equal((await put([])).json().activeItemId, null);
+    assert.equal((await app.inject({ method: "PUT", url: "/api/v1/pipgm/pipelines/PiPGM9/playlist/order", payload: { itemIds: [] } })).statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
