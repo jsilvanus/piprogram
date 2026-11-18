@@ -796,6 +796,33 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     }
   });
 
+  // A draft playlist for a day from the items' useAt dates. Nothing is saved or loaded; it is a POST because it is a
+  // computation with a body, so it needs the API key like any other POST.
+  app.post<{ Body: { date?: unknown; orientation?: unknown; name?: unknown } }>("/api/v1/pipgm/playlists/generate", async (request, reply) => {
+    const { date, orientation, name } = request.body ?? {};
+    if (typeof date !== "string") return invalid(reply, "DATE_REQUIRED", "date is required (YYYY-MM-DD)");
+    if (orientation !== undefined && orientation !== "landscape" && orientation !== "portrait") {
+      return invalid(reply, "INVALID_ORIENTATION", "orientation must be landscape or portrait");
+    }
+    if (name !== undefined && typeof name !== "string") return invalid(reply, "INVALID_NAME", "name must be a string");
+    let items;
+    try {
+      items = service.itemsForDate(date);
+    } catch (error) {
+      if (error instanceof UseAtError) return invalid(reply, "INVALID_DATE", error.message);
+      throw error;
+    }
+    return reply.code(200).send({
+      date,
+      draft: {
+        schema: "piprogram.playlist/1",
+        name: name?.trim() || `Draft ${date}`,
+        ...(orientation ? { orientation } : {}),
+        items: items.map(savedItemOf)
+      }
+    });
+  });
+
   app.get<{ Params: { playlistId: string } }>("/api/v1/pipgm/playlists/:playlistId", async (request, reply) => {
     try {
       const found = await playlists.get(request.params.playlistId);
