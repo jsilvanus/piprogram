@@ -40,6 +40,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assetsOfEntry, LibraryPersistence } from "./library-store.js";
+import type { SavedPlaylistItem } from "./playlist-store.js";
 import { buildPptxSteps, parsePptxPresentation } from "./pptx-adapter.js";
 
 interface PipelineInternalState {
@@ -61,10 +62,29 @@ interface PipelineInternalState {
   currentStep: number;
   playbackState: PiPgmPlaybackState;
   playlist: PiPgmItem[];
+  /**
+   * An item that stays on air after a playlist was loaded over it although the new list does not hold it. It sits
+   * first in `playlist` until the feed moves off it, and is then removed. Never stored.
+   */
+  carriedItemId: string | null;
   stream: ManagedStreamSnapshot;
 }
 
 const USE_AT_ZONE = process.env.PIPGM_TIMEZONE?.trim() || DEFAULT_TIMEZONE;
+
+export interface LoadReport {
+  mode: "replace" | "append";
+  /** Which entries were found, and how (by id, or by the fallback match). */
+  resolved: Array<{ index: number; itemId: string; by: "id" | "kindTitle" | "hymnNumber" }>;
+  /** Entries that no longer resolve to a library item. Never dropped silently. */
+  missing: Array<{ index: number; itemId: string; kind?: string; title?: string; hymn?: { number: number | string } }>;
+  /** Entries left out because the item was already in the list. */
+  duplicates: Array<{ index: number; itemId: string }>;
+  /** The item that stayed on air (replace only), or null when nothing was active. */
+  keptActiveItemId: string | null;
+  /** True when that item is not in the new list and is carried until the feed moves on. */
+  carriedActiveItem: boolean;
+}
 
 const sameIds = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((id, i) => id === b[i]);
 
@@ -305,6 +325,7 @@ export class PiPgmService {
         currentStep: 0,
         playbackState: "stopped",
         playlist: [],
+        carriedItemId: null,
         stream: {
           state: "disabled",
           jobId: null,
@@ -398,6 +419,11 @@ export class PiPgmService {
     if (this.liveRestored) void this.flushLivePlaylists();
   }
 
+  /** The playlist as stored: the item carried over from a loaded playlist is not part of it. */
+  private liveIdsOf(state: PipelineInternalState): string[] {
+    return state.playlist.filter((i) => i.id !== state.carriedItemId).map((i) => i.id);
+  }
+
   private async flushLivePlaylists(): Promise<void> {
     const store = this.libraryStore;
     if (!store || !this.liveRestored) return;
@@ -405,10 +431,10 @@ export class PiPgmService {
       [...this.liveDirty].map(async (id) => {
         const state = this.pipelines.get(id);
         if (!state) return;
-        const ids = state.playlist.map((i) => i.id);
+        const ids = this.liveIdsOf(state);
         try {
           await store.saveLivePlaylist(id, ids);
-          if (this.liveDirty.has(id) && sameIds(ids, state.playlist.map((i) => i.id))) this.liveDirty.delete(id);
+          if (this.liveDirty.has(id) && sameIds(ids, this.liveIdsOf(state))) this.liveDirty.delete(id);
         } catch {
           // stays dirty; flushLibrary() retries
         }
@@ -516,7 +542,8 @@ export class PiPgmService {
     for (const state of this.pipelines.values()) {
       const before = state.playlist.length;
       state.playlist = state.playlist.filter((i) => i.id !== itemId);
-      if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
+      if (state.carriedItemId === itemId) state.carriedItemId = null;
+      else if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
       if (state.activeItemId === itemId) state.activeItemId = null;
       if (state.basicImageItemId === itemId) state.basicImageItemId = null;
     }
@@ -550,6 +577,7 @@ export class PiPgmService {
       currentStep: step,
       playbackState: "playing",
       playlist: [structuredClone(item)],
+      carriedItemId: null,
       stream: { ...base.stream }
     });
   }
@@ -1088,6 +1116,7 @@ export class PiPgmService {
         break;
     }
 
+    this.dropCarriedItem(state);
     const snapshot = this.toSnapshot(state);
     this.emitPipelineEvent(`control:${request.action}`, snapshot);
 
@@ -1140,6 +1169,109 @@ export class PiPgmService {
     return snapshot;
   }
 
+  /** Removes the item carried over from a loaded playlist once the feed has moved off it. */
+  private dropCarriedItem(state: PipelineInternalState): void {
+    if (state.carriedItemId === null || state.activeItemId === state.carriedItemId) return;
+    const carried = state.carriedItemId;
+    state.carriedItemId = null;
+    state.playlist = state.playlist.filter((i) => i.id !== carried);
+  }
+
+  /** The library item a saved entry stands for: by id, else the newest item of the same kind and title, else a hymn of that number. */
+  private resolveSavedItem(entry: SavedPlaylistItem): { item: PiPgmItem; by: "id" | "kindTitle" | "hymnNumber" } | null {
+    const byId = this.library.get(entry.itemId);
+    if (byId) return { item: byId, by: "id" };
+    const newest = (items: PiPgmItem[]): PiPgmItem | undefined =>
+      items.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0];
+    const all = [...this.library.values()];
+    if (entry.kind && entry.title) {
+      const found = newest(all.filter((i) => i.kind === entry.kind && i.title === entry.title));
+      if (found) return { item: found, by: "kindTitle" };
+    }
+    if (entry.hymn) {
+      const number = String(entry.hymn.number).trim();
+      const found = newest(all.filter((i) => i.kind === "hymn" && i.hymn?.hymnNumber.trim() === number));
+      if (found) return { item: found, by: "hymnNumber" };
+    }
+    return null;
+  }
+
+  /**
+   * Puts a saved playlist on a feed. `replace` makes it the whole playlist, `append` adds what is not there yet.
+   * Whatever is on air is not touched: the active item and its step stay (when the new list does not hold the
+   * active item it is carried first in the list until the feed moves on, so "next" goes to the first new item).
+   * Nothing is cued when nothing was active. Entries that no longer resolve to a library item are reported in
+   * `missing`; with `strict` any of them refuses the load and nothing changes.
+   */
+  loadSavedPlaylist(
+    pipelineId: string,
+    entries: readonly SavedPlaylistItem[],
+    mode: "replace" | "append",
+    options: { strict?: boolean } = {}
+  ):
+    | { error: "MISSING_ITEMS"; missing: LoadReport["missing"] }
+    | { pipeline: PiPgmPipelineSnapshot; report: LoadReport }
+    | undefined {
+    const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
+    if (!state) return undefined;
+
+    const resolved: LoadReport["resolved"] = [];
+    const missing: LoadReport["missing"] = [];
+    const duplicates: LoadReport["duplicates"] = [];
+    const chosen = new Set<string>(mode === "append" ? state.playlist.map((i) => i.id) : []);
+    const items: PiPgmItem[] = [];
+    entries.forEach((entry, index) => {
+      const found = this.resolveSavedItem(entry);
+      if (!found) {
+        missing.push({
+          index,
+          itemId: entry.itemId,
+          ...(entry.kind ? { kind: entry.kind } : {}),
+          ...(entry.title ? { title: entry.title } : {}),
+          ...(entry.hymn ? { hymn: entry.hymn } : {})
+        });
+        return;
+      }
+      if (chosen.has(found.item.id)) {
+        duplicates.push({ index, itemId: found.item.id });
+        return;
+      }
+      chosen.add(found.item.id);
+      items.push(structuredClone(found.item));
+      resolved.push({ index, itemId: found.item.id, by: found.by });
+    });
+    if (options.strict && missing.length > 0) return { error: "MISSING_ITEMS", missing };
+
+    let keptActiveItemId: string | null = null;
+    if (mode === "append") {
+      state.playlist.push(...items);
+    } else {
+      const active = state.activeItemId === null ? undefined : state.playlist.find((i) => i.id === state.activeItemId);
+      state.playlist = items;
+      state.carriedItemId = null;
+      if (active) {
+        keptActiveItemId = active.id;
+        if (!items.some((i) => i.id === active.id)) {
+          state.playlist.unshift(active);
+          state.carriedItemId = active.id;
+        }
+      } else if (state.activeItemId !== null) {
+        // The active item was not in the playlist (it was cued from the library): nothing to keep.
+        state.activeItemId = null;
+        state.currentStep = 0;
+        state.playbackState = "stopped";
+      }
+    }
+    this.persistLivePlaylist(state.id);
+
+    const snapshot = this.toSnapshot(state);
+    this.emitPipelineEvent("playlist:load", snapshot);
+    return {
+      pipeline: snapshot,
+      report: { mode, resolved, missing, duplicates, keptActiveItemId, carriedActiveItem: state.carriedItemId !== null }
+    };
+  }
+
   /**
    * Replaces or reorders the playlist in one step. `itemIds` becomes the whole playlist, in that order
    * (items that were not in it are added, items left out are removed). Nothing changes when an id is
@@ -1159,6 +1291,7 @@ export class PiPgmService {
     if (duplicates.length > 0) return { error: "DUPLICATE_ITEMS", ids: [...new Set(duplicates)] };
 
     state.playlist = itemIds.map((id) => structuredClone(this.library.get(id)!));
+    state.carriedItemId = null;
     this.persistLivePlaylist(state.id);
     if (state.activeItemId === null ? state.playlist.length > 0 : !seen.has(state.activeItemId)) {
       state.activeItemId = state.playlist[0]?.id ?? null;
@@ -1177,7 +1310,8 @@ export class PiPgmService {
 
     const before = state.playlist.length;
     state.playlist = state.playlist.filter((i) => i.id !== itemId);
-    if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
+    if (state.carriedItemId === itemId) state.carriedItemId = null;
+    else if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
     if (state.activeItemId === itemId) {
       state.activeItemId = state.playlist[0]?.id ?? null;
       state.currentStep = 0;
