@@ -66,6 +66,8 @@ interface PipelineInternalState {
 
 const USE_AT_ZONE = process.env.PIPGM_TIMEZONE?.trim() || DEFAULT_TIMEZONE;
 
+const sameIds = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((id, i) => id === b[i]);
+
 export interface CreateHymnItemInput {
   title: string;
   hymnNumber?: string;
@@ -242,6 +244,10 @@ export class PiPgmService {
   /** Items whose last write to the store failed (or is running), with the reason. Retried by flushLibrary(). */
   private readonly unsaved = new Map<string, { assetIds: string[]; expiresAt: string | undefined; error: string | null; metadataOnly?: boolean }>();
   private readonly savedItems = new Set<string>();
+  /** Feeds whose live playlist changed and is not stored yet. */
+  private readonly liveDirty = new Set<PiPgmPipelineId>();
+  /** True once the stored live playlists have been read (or there is no store); only then are they written. */
+  private liveRestored = false;
 
   constructor(options: PiPgmServiceOptions = {}) {
     this.eventBroker = options.eventBroker;
@@ -381,7 +387,53 @@ export class PiPgmService {
   /** Retries every item that is not stored yet. Returns how many are still unsaved. */
   async flushLibrary(): Promise<number> {
     await Promise.all([...this.unsaved.keys()].map((id) => this.writeItem(id)));
-    return this.unsaved.size;
+    await this.flushLivePlaylists();
+    return this.unsaved.size + this.liveDirty.size;
+  }
+
+  /** Marks a feed's playlist as changed; it is written to the store (ids only) once the stored ones have been read. */
+  private persistLivePlaylist(pipelineId: PiPgmPipelineId): void {
+    if (!this.libraryStore) return;
+    this.liveDirty.add(pipelineId);
+    if (this.liveRestored) void this.flushLivePlaylists();
+  }
+
+  private async flushLivePlaylists(): Promise<void> {
+    const store = this.libraryStore;
+    if (!store || !this.liveRestored) return;
+    await Promise.all(
+      [...this.liveDirty].map(async (id) => {
+        const state = this.pipelines.get(id);
+        if (!state) return;
+        const ids = state.playlist.map((i) => i.id);
+        try {
+          await store.saveLivePlaylist(id, ids);
+          if (this.liveDirty.has(id) && sameIds(ids, state.playlist.map((i) => i.id))) this.liveDirty.delete(id);
+        } catch {
+          // stays dirty; flushLibrary() retries
+        }
+      })
+    );
+  }
+
+  /**
+   * Puts the stored playlists back after a restart. A feed that already changed meanwhile is left as it is (and written
+   * later); items that are no longer in the library are skipped and reported through onSkip. Nothing goes on air: the
+   * feeds start with no active item, as before.
+   */
+  private async restoreLivePlaylists(onSkip?: (key: string, reason: string) => void): Promise<void> {
+    const store = this.libraryStore;
+    if (!store) return;
+    for (const [id, state] of this.pipelines) {
+      if (this.liveDirty.has(id) || state.playlist.length > 0) continue;
+      const ids = await store.loadLivePlaylist(id);
+      if (!ids) continue;
+      for (const itemId of ids) {
+        const item = this.library.get(itemId);
+        if (item) state.playlist.push(structuredClone(item));
+        else onSkip?.(`live/${id}`, `item ${itemId} is no longer in the library`);
+      }
+    }
   }
 
   libraryStorageStatus(): { enabled: boolean; stored: number; unsaved: Array<{ itemId: string; error: string | null }> } {
@@ -411,6 +463,9 @@ export class PiPgmService {
       }
     }
     this.idCounter = maxId + 1;
+    await this.restoreLivePlaylists(onSkip);
+    this.liveRestored = true;
+    await this.flushLivePlaylists();
     return entries.length;
   }
 
@@ -459,7 +514,9 @@ export class PiPgmService {
     this.unsaved.delete(itemId);
     this.savedItems.delete(itemId);
     for (const state of this.pipelines.values()) {
+      const before = state.playlist.length;
       state.playlist = state.playlist.filter((i) => i.id !== itemId);
+      if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
       if (state.activeItemId === itemId) state.activeItemId = null;
       if (state.basicImageItemId === itemId) state.basicImageItemId = null;
     }
@@ -869,7 +926,9 @@ export class PiPgmService {
         }
       }
       for (const state of this.pipelines.values()) {
+        const before = state.playlist.length;
         state.playlist = state.playlist.filter((i) => i.id !== entry.itemId);
+        if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
         if (state.activeItemId === entry.itemId) state.activeItemId = null;
       }
     }
@@ -948,6 +1007,7 @@ export class PiPgmService {
             if (libItem) {
               targetItem = structuredClone(libItem);
               state.playlist.push(targetItem);
+              this.persistLivePlaylist(state.id);
             }
           }
         } else if (request.itemIndex !== undefined && request.itemIndex >= 0 && request.itemIndex < state.playlist.length) {
@@ -1064,6 +1124,7 @@ export class PiPgmService {
     const existingIdx = state.playlist.findIndex((i) => i.id === item.id);
     if (existingIdx < 0) {
       state.playlist.push(structuredClone(item));
+      this.persistLivePlaylist(state.id);
     } else {
       state.playlist[existingIdx] = structuredClone(item);
     }
@@ -1098,6 +1159,7 @@ export class PiPgmService {
     if (duplicates.length > 0) return { error: "DUPLICATE_ITEMS", ids: [...new Set(duplicates)] };
 
     state.playlist = itemIds.map((id) => structuredClone(this.library.get(id)!));
+    this.persistLivePlaylist(state.id);
     if (state.activeItemId === null ? state.playlist.length > 0 : !seen.has(state.activeItemId)) {
       state.activeItemId = state.playlist[0]?.id ?? null;
       state.currentStep = 0;
@@ -1113,7 +1175,9 @@ export class PiPgmService {
     const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
     if (!state) return undefined;
 
+    const before = state.playlist.length;
     state.playlist = state.playlist.filter((i) => i.id !== itemId);
+    if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
     if (state.activeItemId === itemId) {
       state.activeItemId = state.playlist[0]?.id ?? null;
       state.currentStep = 0;

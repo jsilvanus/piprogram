@@ -78,6 +78,7 @@ By default the media library (uploaded images, audio, video, .pptx files, hymns,
 - At start the items are read back and ids continue after the highest stored one. File bytes are fetched from pistorage when a browser or the stage asks for them (503 if pistorage is down, never a silent empty file).
 - A write that fails (pistorage or the bucket is down) keeps the item in memory as *unsaved* and is retried every minute. `GET /api/v1/pipgm/library/storage` lists unsaved items and the last error. If pistorage is down at start, loading is retried the same way.
 - `DELETE /api/v1/pipgm/items/{itemId}` removes the item, its files and its places in the playlists.
+- **Live playlists** survive a restart: each feed's playlist (item ids, in order) is written to `<prefix>/live/<pipelineId>.json` whenever it changes (retried like items; nothing is written before the stored ones have been read, so a store that was down at start cannot be overwritten). At load the items are put back from the library; ids that are gone are skipped and reported. No item is active after a restart (the feeds stay black until cued). Prepared speech items are not stored, so they drop out.
 - Prepared speech is not stored there: it is rebuilt from text and stays in `PIPGM_CACHE_DIR`.
 - Canva exports are links, not files, so there is nothing to keep (and no retention deadline) for them yet.
 - Not run against a real pistorage or S3; the tests use a fake store and a fake fetch.

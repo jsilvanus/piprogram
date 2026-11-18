@@ -173,6 +173,13 @@ export function assetsOfEntry(entry: StoredLibraryEntry): StoredAsset[] {
   return entry.assets ?? (entry.asset ? [entry.asset] : []);
 }
 
+/** A feed's live playlist as kept in the store: item ids only (the items are in the library). */
+export interface StoredLivePlaylist {
+  schema: "piprogram.live-playlist/1";
+  itemIds: string[];
+  savedAt: string;
+}
+
 export class LibraryPersistence {
   constructor(
     private readonly store: BlobStore,
@@ -202,6 +209,29 @@ export class LibraryPersistence {
       expiresAt,
       useAt
     });
+  }
+
+  private liveKey(pipelineId: string): string {
+    return `${this.prefix}/live/${pipelineId}.json`;
+  }
+
+  /** The ids of a feed's live playlist, in order. */
+  async saveLivePlaylist(pipelineId: string, itemIds: string[]): Promise<void> {
+    const body: StoredLivePlaylist = { schema: "piprogram.live-playlist/1", itemIds, savedAt: new Date().toISOString() };
+    await this.store.put(this.liveKey(pipelineId), Buffer.from(JSON.stringify(body)), { contentType: "application/json" });
+  }
+
+  /** The stored live playlist of a feed: null when there is none or it is not readable. Throws when the store is down. */
+  async loadLivePlaylist(pipelineId: string): Promise<string[] | null> {
+    const bytes = await this.store.get(this.liveKey(pipelineId));
+    if (!bytes) return null;
+    try {
+      const body = JSON.parse(bytes.toString("utf8")) as Partial<StoredLivePlaylist>;
+      if (body.schema !== "piprogram.live-playlist/1" || !Array.isArray(body.itemIds)) return null;
+      return body.itemIds.filter((id): id is string => typeof id === "string");
+    } catch {
+      return null;
+    }
   }
 
   async remove(itemId: string, assetIds: string[]): Promise<void> {
