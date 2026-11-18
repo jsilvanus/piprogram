@@ -123,6 +123,14 @@ The generated client reads every non-JSON body as text, so it cannot return the 
 
 Playlists from the CLI: `piprogram playlists list|get|save|load|export|import|generate|delete` and `piprogram pipelines playlist steps|order` (see `piprogram help`). `export` writes the `piprogram.playlist/1` document without its id, `import` makes a new saved playlist from such a file, so playlists can move between Pis.
 
+## Future work: video playback on feeds
+
+Video and YouTube items can be created and cued today, but a feed only publishes still PNG frames, so moving pictures and their sound do not reach the HDMI side (see "Publishing the feeds to MediaMTX"). Planned, not built:
+
+- **The live route:** while a video or YouTube item is active, an ffmpeg process per feed replaces the PNG loop and publishes the moving picture (with the item's audio when the feed is armed) to the same MediaMTX stream name, then hands back to the PNG loop afterwards. The stream must not drop at the switch. Sound stays subject to the arm state and the gain cap.
+- **Video thumbnails:** step pictures and thumbnails for video items (for example a frame at a chosen time), so the playlist steps strip and the UI show something other than a placeholder (today `prepare` answers 422 for video, audio and YouTube).
+- **Canva mp4 target:** Canva export as mp4 into the same video path (Canva items already have an `exported_mp4` mode in the model, but nothing plays it on a feed yet).
+
 ## Still in pimatrix
 
 Until the Pi switches over, pimatrix still mounts the old `/api/v1/pipgm/*` routes. They can go once picontrol points at this API.
