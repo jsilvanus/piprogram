@@ -703,6 +703,59 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/StorageUnavailable"
+  /api/v1/pipgm/pipelines/{pipelineId}/playlist/load:
+    post:
+      operationId: loadSavedPlaylist
+      tags: [Playlists]
+      summary: Put a saved playlist on a feed without touching what is on air
+      description: >
+        `replace` (default) makes the saved playlist the whole playlist, `append` adds the items that are not
+        there yet. The active item and its step never change: when the new list does not hold the item on air it
+        is carried first in the list until the feed moves on. Nothing is cued when nothing was active. Entries
+        are matched by id, else by kind and title, else (hymns) by number. Entries that match nothing are listed
+        in `report.missing`; with `strict` any of them answers 409 and nothing changes.
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [playlistId]
+              properties:
+                playlistId:
+                  type: string
+                mode:
+                  type: string
+                  enum: [replace, append]
+                strict:
+                  type: boolean
+      responses:
+        "200":
+          description: The pipeline and a report of what was found
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pipeline, report]
+                properties:
+                  pipeline:
+                    $ref: "#/components/schemas/Pipeline"
+                  report:
+                    $ref: "#/components/schemas/LoadReport"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Strict load with items missing from the library; nothing changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
   /api/v1/pipgm/pipelines/{pipelineId}/playlist/save:
     post:
       operationId: savePipelinePlaylist
@@ -1303,6 +1356,57 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    LoadReport:
+      type: object
+      required: [mode, resolved, missing, duplicates, keptActiveItemId, carriedActiveItem]
+      properties:
+        mode:
+          type: string
+          enum: [replace, append]
+        resolved:
+          type: array
+          items:
+            type: object
+            required: [index, itemId, by]
+            properties:
+              index:
+                type: integer
+              itemId:
+                type: string
+              by:
+                type: string
+                enum: [id, kindTitle, hymnNumber]
+        missing:
+          type: array
+          items:
+            type: object
+            required: [index, itemId]
+            properties:
+              index:
+                type: integer
+              itemId:
+                type: string
+              kind:
+                type: string
+              title:
+                type: string
+              hymn:
+                type: object
+        duplicates:
+          type: array
+          items:
+            type: object
+            required: [index, itemId]
+            properties:
+              index:
+                type: integer
+              itemId:
+                type: string
+        keptActiveItemId:
+          type: string
+          nullable: true
+        carriedActiveItem:
+          type: boolean
     PlaylistItem:
       type: object
       required: [itemId]

@@ -239,3 +239,120 @@ test("saved playlists answer 503 while the store is down", async () => {
     await app.close();
   }
 });
+
+async function hymnItem(app: ReturnType<typeof buildPipgmServer>, title: string, hymnNumber?: string): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/v1/pipgm/items/hymn",
+    payload: { title, ...(hymnNumber ? { hymnNumber } : {}), stanzas: [{ lines: ["a"] }, { lines: ["b"] }, { lines: ["c"] }] }
+  });
+  return res.json().id as string;
+}
+
+test("playlist/load replaces a playlist without touching what is on air", async () => {
+  const app = buildPipgmServer();
+  try {
+    const [a, b, c, d] = [await hymnItem(app, "A"), await hymnItem(app, "B"), await hymnItem(app, "C"), await hymnItem(app, "D")];
+    const feed = "/api/v1/pipgm/pipelines/PiPGM1";
+    const put = (itemIds: string[]) => app.inject({ method: "PUT", url: `${feed}/playlist/order`, payload: { itemIds } });
+    const save = async (name: string) => (await app.inject({ method: "POST", url: `${feed}/playlist/save`, payload: { name } })).json().id as string;
+    const load = (body: object) => app.inject({ method: "POST", url: `${feed}/playlist/load`, payload: body });
+    const state = async () => (await app.inject({ method: "GET", url: feed })).json();
+
+    await put([a, b]);
+    const ab = await save("AB");
+    await put([c, d]);
+    const cd = await save("CD");
+
+    // nothing on air: the list is replaced and nothing is cued
+    await app.inject({ method: "POST", url: `${feed}/control`, payload: { action: "stop" } });
+    await app.inject({ method: "DELETE", url: `${feed}/playlist/${c}` });
+    await app.inject({ method: "DELETE", url: `${feed}/playlist/${d}` });
+    let res = await load({ playlistId: ab });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json().pipeline.playlist.map((i: { id: string }) => i.id), [a, b]);
+    assert.equal(res.json().report.keptActiveItemId, null);
+
+    // on air at step 1 of B; the new list holds B at another place: B and its step stay
+    await app.inject({ method: "POST", url: `${feed}/control`, payload: { action: "gotoItem", itemId: b, stepIndex: 1 } });
+    await put([b, a]);
+    await put([a, b]);
+    res = await load({ playlistId: (await save("AB again")) });
+    assert.equal(res.json().report.keptActiveItemId, b);
+    assert.equal(res.json().report.carriedActiveItem, false);
+    assert.equal(res.json().pipeline.activeItemId, b);
+    assert.equal(res.json().pipeline.currentStep, 1);
+
+    // the new list does not hold the item on air: it stays, first in the list, until the feed moves on
+    res = await load({ playlistId: cd });
+    assert.equal(res.json().report.carriedActiveItem, true);
+    assert.equal(res.json().pipeline.activeItemId, b);
+    assert.equal(res.json().pipeline.currentStep, 1);
+    assert.deepEqual(res.json().pipeline.playlist.map((i: { id: string }) => i.id), [b, c, d]);
+    // a restart-style reload of the saved ids does not store the carried item
+    await app.inject({ method: "POST", url: `${feed}/control`, payload: { action: "gotoStep", stepIndex: 2 } });
+    assert.equal((await state()).playlist.length, 3, "still carried while on B");
+    const next = await app.inject({ method: "POST", url: `${feed}/control`, payload: { action: "gotoItem", itemId: c } });
+    assert.deepEqual(next.json().playlist.map((i: { id: string }) => i.id), [c, d]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("playlist/load reports missing items, matches by kind and title or hymn number, and strict refuses", async () => {
+  const app = buildPipgmServer();
+  try {
+    const feed = "/api/v1/pipgm/pipelines/PiPGM3";
+    const old = await hymnItem(app, "Old title", "12");
+    const gone = await hymnItem(app, "Gone");
+    await app.inject({ method: "PUT", url: `${feed}/playlist/order`, payload: { itemIds: [old, gone] } });
+    const saved = (await app.inject({ method: "POST", url: `${feed}/playlist/save`, payload: { name: "S" } })).json().id as string;
+    // the items are deleted and the hymn 12 and "Gone" are made again as new items
+    await app.inject({ method: "DELETE", url: `/api/v1/pipgm/items/${old}` });
+    await app.inject({ method: "DELETE", url: `/api/v1/pipgm/items/${gone}` });
+    const newHymn = await hymnItem(app, "Another title", "12");
+
+    const res = await app.inject({ method: "POST", url: `${feed}/playlist/load`, payload: { playlistId: saved } });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json().report.resolved, [{ index: 0, itemId: newHymn, by: "hymnNumber" }]);
+    assert.deepEqual(res.json().report.missing.map((m: { itemId: string; title: string }) => [m.itemId, m.title]), [[gone, "Gone"]]);
+    assert.deepEqual(res.json().pipeline.playlist.map((i: { id: string }) => i.id), [newHymn]);
+
+    const goneAgain = await hymnItem(app, "Gone"); // same kind and title, new id
+    const byTitle = await app.inject({ method: "POST", url: `${feed}/playlist/load`, payload: { playlistId: saved, strict: true } });
+    assert.equal(byTitle.statusCode, 200);
+    assert.deepEqual(byTitle.json().report.resolved.map((r: { by: string }) => r.by), ["hymnNumber", "kindTitle"]);
+    assert.equal(byTitle.json().report.resolved[1].itemId, goneAgain);
+
+    await app.inject({ method: "DELETE", url: `/api/v1/pipgm/items/${goneAgain}` });
+    const before = (await app.inject({ method: "GET", url: feed })).json().playlist.length;
+    const strict = await app.inject({ method: "POST", url: `${feed}/playlist/load`, payload: { playlistId: saved, strict: true } });
+    assert.equal(strict.statusCode, 409);
+    assert.equal(strict.json().error.code, "MISSING_ITEMS");
+    assert.equal((await app.inject({ method: "GET", url: feed })).json().playlist.length, before);
+  } finally {
+    await app.close();
+  }
+});
+
+test("playlist/load appends without duplicates, and refuses bad requests", async () => {
+  const app = buildPipgmServer();
+  try {
+    const feed = "/api/v1/pipgm/pipelines/PiPGM2";
+    const [a, b] = [await hymnItem(app, "A"), await hymnItem(app, "B")];
+    await app.inject({ method: "PUT", url: `${feed}/playlist/order`, payload: { itemIds: [a, b] } });
+    const saved = (await app.inject({ method: "POST", url: `${feed}/playlist/save`, payload: { name: "S" } })).json().id as string;
+    await app.inject({ method: "DELETE", url: `${feed}/playlist/${b}` });
+    const res = await app.inject({ method: "POST", url: `${feed}/playlist/load`, payload: { playlistId: saved, mode: "append" } });
+    assert.deepEqual(res.json().pipeline.playlist.map((i: { id: string }) => i.id), [a, b]);
+    assert.deepEqual(res.json().report.duplicates, [{ index: 0, itemId: a }]);
+
+    const load = (payload: object) => app.inject({ method: "POST", url: `${feed}/playlist/load`, payload });
+    assert.equal((await load({})).json().error.code, "PLAYLIST_ID_REQUIRED");
+    assert.equal((await load({ playlistId: saved, mode: "merge" })).json().error.code, "INVALID_MODE");
+    assert.equal((await load({ playlistId: "pl-000000000000" })).statusCode, 404);
+    assert.equal((await app.inject({ method: "POST", url: "/api/v1/pipgm/pipelines/PiPGM9/playlist/load", payload: { playlistId: saved } })).statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});

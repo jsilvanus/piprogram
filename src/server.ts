@@ -828,6 +828,33 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     }
   });
 
+  // Put a saved playlist on a feed without touching what is on air. Needs the API key like any write.
+  app.post<{ Params: { pipelineId: string }; Body: { playlistId?: unknown; mode?: unknown; strict?: unknown } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/playlist/load",
+    async (request, reply) => {
+      if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
+      const { playlistId, mode = "replace", strict } = request.body ?? {};
+      if (typeof playlistId !== "string" || !playlistId.trim()) return invalid(reply, "PLAYLIST_ID_REQUIRED", "playlistId is required");
+      if (mode !== "replace" && mode !== "append") return invalid(reply, "INVALID_MODE", "mode must be replace or append");
+      if (strict !== undefined && typeof strict !== "boolean") return invalid(reply, "INVALID_STRICT", "strict must be true or false");
+      let saved;
+      try {
+        saved = await playlists.get(playlistId);
+      } catch (error) {
+        return storageDown(reply, error);
+      }
+      if (!saved) return playlistNotFound(reply, playlistId);
+      const result = service.loadSavedPlaylist(request.params.pipelineId, saved.items, mode, { strict: strict === true });
+      if (!result) return notFound(reply, request.params.pipelineId);
+      if ("error" in result) {
+        return reply.code(409).send({
+          error: { code: "MISSING_ITEMS", message: `${result.missing.length} item(s) are not in the library; nothing was loaded`, missing: result.missing }
+        });
+      }
+      return reply.code(200).send(result);
+    }
+  );
+
   // Save a feed's current playlist under a name (a new saved playlist, or replace one with playlistId).
   app.post<{ Params: { pipelineId: string }; Body: { name?: unknown; playlistId?: unknown } }>(
     "/api/v1/pipgm/pipelines/:pipelineId/playlist/save",

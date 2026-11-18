@@ -252,3 +252,16 @@ test("a playlist write while the store is down is retried", async () => {
   assert.equal(await service.flushLibrary(), 0);
   assert.deepEqual(JSON.parse(store.objects.get("piprogram/library/live/PiPGM1.json")!.toString()).itemIds, [a.id]);
 });
+
+test("an item carried on air after a playlist load is not stored in the live playlist", async () => {
+  const store = new MemoryBlobStore();
+  const service = newService(store);
+  await service.loadLibrary();
+  const a = service.createHymnItem({ title: "A", stanzas: [{ lines: ["a"] }] });
+  const b = service.createHymnItem({ title: "B", stanzas: [{ lines: ["b"] }] });
+  service.addItemToPipeline("PiPGM1", a.id); // A is on air
+  const result = service.loadSavedPlaylist("PiPGM1", [{ itemId: b.id }], "replace");
+  assert.ok(result && "report" in result && result.report.carriedActiveItem);
+  await service.flushLibrary();
+  assert.deepEqual(JSON.parse(store.objects.get("piprogram/library/live/PiPGM1.json")!.toString()).itemIds, [b.id]);
+});

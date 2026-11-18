@@ -44,7 +44,7 @@ A saved playlist is a named list of library items (`piprogram.playlist/1`, see `
 
 - `GET /api/v1/pipgm/playlists` (summaries, newest first), `POST` (create, 201), `GET|PUT|DELETE /playlists/{id}`. Invalid documents answer 422 `INVALID_PLAYLIST` with every problem in `error.errors` (name 1 to 120 characters, at most 500 items).
 - `POST /pipelines/{id}/playlist/save {name, playlistId?}` saves a feed's current playlist (201), or replaces the saved one named by `playlistId` (200).
-- Loading a saved playlist onto a feed is the next piece.
+- `POST /pipelines/{id}/playlist/load {playlistId, mode?: replace|append, strict?}` puts a saved playlist on a feed **without touching what is on air**: the active item and its step stay. If the new list does not hold the item on air, that item is carried first in the list until the feed moves on (so Next goes to the first new item) and is then dropped; it is never stored. Nothing is cued when nothing was active. Entries are matched by id, else by kind and title (newest item), else a hymn by number. Entries that match nothing come back in `report.missing` (with `strict`, any of them answers 409 and nothing changes); append skips items already listed (`report.duplicates`). Tests: `src/server.test.ts`.
 
 ## Audio and the basic image
 
