@@ -249,6 +249,8 @@ export interface PiPgmPipelineSnapshot {
   state: PiPgmPipelineState;
   fadeToBlack: boolean;
   fadeDurationMs: number;
+  /** Chroma key colour (#rrggbb) for ATEM feeds; null = the normal stage background (projectors). */
+  keyColor: string | null;
   /** Sound is armed (allowed). Off by default; arming lasts until `audioArmedUntil`. */
   audioEnabled: boolean;
   audioArmedUntil: string | null;
