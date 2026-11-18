@@ -38,6 +38,14 @@ Writes need `Authorization: Bearer <key>` or `x-api-key` when a key is set. Read
 
 Not in 1.0: the Canva Connect export route (`items/:id/canva/export`); the push and the export-package routes are below. The effects bridge that pimatrix used for PiPGM fades and mutes is not here; a host that needs it should listen for the pipeline snapshots.
 
+## Saved playlists
+
+A saved playlist is a named list of library items (`piprogram.playlist/1`, see `src/playlist-store.ts`): per entry the item id, with kind, title and, for a hymn, its number as a fallback match. It holds no slides or bytes. Each one is a JSON file `piprogram/playlists/<id>.json` in the same store as the library (pistorage when `PIPGM_STORAGE_URL` is set, memory otherwise). Writes need the API key; a store that cannot be reached answers 503 `STORAGE_UNAVAILABLE`.
+
+- `GET /api/v1/pipgm/playlists` (summaries, newest first), `POST` (create, 201), `GET|PUT|DELETE /playlists/{id}`. Invalid documents answer 422 `INVALID_PLAYLIST` with every problem in `error.errors` (name 1 to 120 characters, at most 500 items).
+- `POST /pipelines/{id}/playlist/save {name, playlistId?}` saves a feed's current playlist (201), or replaces the saved one named by `playlistId` (200).
+- Loading a saved playlist onto a feed is the next piece.
+
 ## Audio and the basic image
 
 Each of the three feeds has **visual content** (the active item, or black) and, separately, **audio content** (a track). A video item carries its own sound as before. piprogram only outputs the feed; where the sound ends up after the Atlona (the PA, via the left projector on output 1) is not its concern.

@@ -609,6 +609,139 @@ paths:
                 $ref: "#/components/schemas/Pipeline"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/playlists:
+    get:
+      operationId: listSavedPlaylists
+      tags: [Playlists]
+      summary: Saved playlists, newest first
+      responses:
+        "200":
+          description: Summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PlaylistSummary"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    post:
+      operationId: createSavedPlaylist
+      tags: [Playlists]
+      summary: Save a new playlist (piprogram.playlist/1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaylistInput"
+      responses:
+        "201":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedPlaylist"
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /api/v1/pipgm/playlists/{playlistId}:
+    parameters:
+      - in: path
+        name: playlistId
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getSavedPlaylist
+      tags: [Playlists]
+      responses:
+        "200":
+          description: The playlist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedPlaylist"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    put:
+      operationId: replaceSavedPlaylist
+      tags: [Playlists]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaylistInput"
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedPlaylist"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    delete:
+      operationId: deleteSavedPlaylist
+      tags: [Playlists]
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /api/v1/pipgm/pipelines/{pipelineId}/playlist/save:
+    post:
+      operationId: savePipelinePlaylist
+      tags: [Playlists]
+      summary: Save a feed's current playlist under a name
+      description: Creates a new saved playlist (201), or replaces the one named by playlistId (200).
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                playlistId:
+                  type: string
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedPlaylist"
+        "201":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SavedPlaylist"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
   /api/v1/pipgm/items:
     get:
       operationId: listItems
@@ -1151,6 +1284,12 @@ components:
       schema:
         $ref: "#/components/schemas/PipgmPipelineId"
   responses:
+    StorageUnavailable:
+      description: The playlist store (pistorage) is not reachable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     NotFound:
       description: Not found
       content:
@@ -1164,6 +1303,76 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    PlaylistItem:
+      type: object
+      required: [itemId]
+      properties:
+        itemId:
+          type: string
+        kind:
+          type: string
+        title:
+          type: string
+        hymn:
+          type: object
+          required: [number]
+          properties:
+            number:
+              oneOf:
+                - type: integer
+                - type: string
+    PlaylistInput:
+      type: object
+      required: [name, items]
+      properties:
+        schema:
+          type: string
+          enum: ["piprogram.playlist/1"]
+        name:
+          type: string
+          maxLength: 120
+        orientation:
+          type: string
+          enum: [landscape, portrait]
+        items:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/PlaylistItem"
+    SavedPlaylist:
+      type: object
+      required: [schema, id, name, savedAt, items]
+      properties:
+        schema:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        savedAt:
+          type: string
+        orientation:
+          type: string
+          enum: [landscape, portrait]
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlaylistItem"
+    PlaylistSummary:
+      type: object
+      required: [id, name, savedAt, itemCount]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        savedAt:
+          type: string
+        orientation:
+          type: string
+          enum: [landscape, portrait]
+        itemCount:
+          type: integer
     PackageTask:
       type: object
       required: [taskId, type, itemId, state, progress, pages, pictures, orientations, saved, ready, error, startedAt, updatedAt]
