@@ -36,7 +36,7 @@ async function main(): Promise<void> {
     : undefined;
   const app = buildPipgmServer({
     ...(libraryStore ? { libraryStore } : {}),
-    ...(blobStore ? { stepStore: blobStore } : {}),
+    ...(blobStore ? { stepStore: blobStore, playlistStore: blobStore } : {}),
     apiKey,
     logger: true,
     cacheDir,

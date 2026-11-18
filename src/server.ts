@@ -24,6 +24,7 @@ import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmF
 import { CanvaPackages, imageTypeOf, numberPages } from "./canva-package.js";
 import { StepImages, ffmpegThumbnailer, type Thumbnailer } from "./step-cache.js";
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
+import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
 import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
@@ -34,6 +35,8 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
    * kept in memory and lost on restart.
    */
   stepStore?: BlobStore | undefined;
+  /** Where saved playlists are kept (pistorage in production; memory without it). */
+  playlistStore?: BlobStore | undefined;
   /** This server's own address as the screenshot browser reaches it (default http://127.0.0.1:$PIPGM_PORT). */
   selfUrl?: string | undefined;
   /** How often a package task looks at the picture preparation (default 100 ms). For tests. */
@@ -150,6 +153,16 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     getItem: (itemId) => service.getLibraryItem(itemId),
     thumbnailer: options.thumbnailer ?? ffmpegThumbnailer(options.publish?.ffmpeg)
   });
+
+  const playlists = new PlaylistStore(options.playlistStore ?? new MemoryBlobStore());
+  const storageDown = (reply: FastifyReply, error: unknown) =>
+    reply.code(503).send({
+      error: { code: "STORAGE_UNAVAILABLE", message: `The playlist store is not reachable: ${error instanceof Error ? error.message : String(error)}` }
+    });
+  const playlistNotFound = (reply: FastifyReply, id: string) =>
+    reply.code(404).send({ error: { code: "PLAYLIST_NOT_FOUND", message: `Unknown saved playlist: ${id}` } });
+  const invalidPlaylist = (reply: FastifyReply, errors: string[]) =>
+    reply.code(422).send({ error: { code: "INVALID_PLAYLIST", message: errors.join("; "), errors } });
 
   const feeders = options.publish
     ? new PipgmFeeders({
@@ -761,6 +774,83 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         });
       }
       return reply.code(200).send(updated);
+    }
+  );
+
+  // ---- Saved playlists ---------------------------------------------------------
+  app.get("/api/v1/pipgm/playlists", async (_request, reply) => {
+    try {
+      return reply.code(200).send({ items: await playlists.list() });
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/v1/pipgm/playlists", async (request, reply) => {
+    const checked = validatePlaylist(request.body);
+    if (!checked.ok) return invalidPlaylist(reply, checked.errors);
+    try {
+      return reply.code(201).send(await playlists.save(checked.value));
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  app.get<{ Params: { playlistId: string } }>("/api/v1/pipgm/playlists/:playlistId", async (request, reply) => {
+    try {
+      const found = await playlists.get(request.params.playlistId);
+      return found ? reply.code(200).send(found) : playlistNotFound(reply, request.params.playlistId);
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  app.put<{ Params: { playlistId: string }; Body: unknown }>("/api/v1/pipgm/playlists/:playlistId", async (request, reply) => {
+    const id = request.params.playlistId;
+    if (!isPlaylistId(id)) return playlistNotFound(reply, id);
+    const checked = validatePlaylist(request.body);
+    if (!checked.ok) return invalidPlaylist(reply, checked.errors);
+    try {
+      const saved = await playlists.save(checked.value, id);
+      return saved ? reply.code(200).send(saved) : playlistNotFound(reply, id);
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  app.delete<{ Params: { playlistId: string } }>("/api/v1/pipgm/playlists/:playlistId", async (request, reply) => {
+    try {
+      return (await playlists.delete(request.params.playlistId))
+        ? reply.code(204).send()
+        : playlistNotFound(reply, request.params.playlistId);
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  // Save a feed's current playlist under a name (a new saved playlist, or replace one with playlistId).
+  app.post<{ Params: { pipelineId: string }; Body: { name?: unknown; playlistId?: unknown } }>(
+    "/api/v1/pipgm/pipelines/:pipelineId/playlist/save",
+    async (request, reply) => {
+      const pipeline = service.getPipeline(request.params.pipelineId);
+      if (!pipeline) return notFound(reply, request.params.pipelineId);
+      const playlistId = request.body?.playlistId;
+      if (playlistId !== undefined && (typeof playlistId !== "string" || !isPlaylistId(playlistId))) {
+        return invalid(reply, "INVALID_PLAYLIST_ID", "playlistId must be the id of a saved playlist");
+      }
+      const checked = validatePlaylist({
+        name: request.body?.name,
+        orientation: pipeline.orientation,
+        items: pipeline.playlist.map(savedItemOf)
+      });
+      if (!checked.ok) return invalidPlaylist(reply, checked.errors);
+      try {
+        const saved = await playlists.save(checked.value, playlistId);
+        if (!saved) return playlistNotFound(reply, String(playlistId));
+        return reply.code(playlistId === undefined ? 201 : 200).send(saved);
+      } catch (error) {
+        return storageDown(reply, error);
+      }
     }
   );
 

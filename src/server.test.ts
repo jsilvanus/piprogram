@@ -171,3 +171,71 @@ test("playlist/order reorders, replaces and refuses unknown or repeated ids with
     await app.close();
   }
 });
+
+test("saved playlists: create, list, read, replace, delete and the validation errors", async () => {
+  const app = buildPipgmServer();
+  try {
+    const base = "/api/v1/pipgm/playlists";
+    const bad = await app.inject({ method: "POST", url: base, payload: { name: "", items: [{}] } });
+    assert.equal(bad.statusCode, 422);
+    assert.equal(bad.json().error.code, "INVALID_PLAYLIST");
+    assert.ok(bad.json().error.errors.length >= 2);
+
+    const created = await app.inject({ method: "POST", url: base, payload: { name: "Messu", items: [{ itemId: "hymn-1", hymn: { number: 336 } }] } });
+    assert.equal(created.statusCode, 201);
+    const id = created.json().id as string;
+    assert.equal(created.json().schema, "piprogram.playlist/1");
+    assert.deepEqual((await app.inject({ method: "GET", url: base })).json().items.map((i: { id: string; itemCount: number }) => [i.id, i.itemCount]), [[id, 1]]);
+    assert.equal((await app.inject({ method: "GET", url: `${base}/${id}` })).json().items[0].hymn.number, 336);
+
+    const put = await app.inject({ method: "PUT", url: `${base}/${id}`, payload: { name: "Messu 2", items: [] } });
+    assert.equal(put.statusCode, 200);
+    assert.equal(put.json().name, "Messu 2");
+    assert.equal((await app.inject({ method: "PUT", url: `${base}/pl-000000000000`, payload: { name: "x", items: [] } })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: `${base}/nope` })).json().error.code, "PLAYLIST_NOT_FOUND");
+
+    assert.equal((await app.inject({ method: "DELETE", url: `${base}/${id}` })).statusCode, 204);
+    assert.equal((await app.inject({ method: "DELETE", url: `${base}/${id}` })).statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
+
+test("playlist/save stores a feed's playlist with kinds, titles and hymn numbers, new or over an old one", async () => {
+  const app = buildPipgmServer();
+  try {
+    const hymn = (await app.inject({ method: "POST", url: "/api/v1/pipgm/items/hymn", payload: { title: "Virsi 336", hymnNumber: "336", stanzas: [{ lines: ["a"] }] } })).json().id as string;
+    await app.inject({ method: "POST", url: "/api/v1/pipgm/pipelines/PiPGM2/playlist", payload: { itemId: hymn } });
+    const url = "/api/v1/pipgm/pipelines/PiPGM2/playlist/save";
+    const saved = await app.inject({ method: "POST", url, payload: { name: "Sunnuntai" } });
+    assert.equal(saved.statusCode, 201);
+    assert.deepEqual(saved.json().items, [{ itemId: hymn, kind: "hymn", title: "336 Virsi 336", hymn: { number: 336 } }]);
+    assert.equal(saved.json().orientation, "landscape");
+    assert.equal((await app.inject({ method: "POST", url, payload: {} })).statusCode, 422);
+
+    await app.inject({ method: "PUT", url: "/api/v1/pipgm/pipelines/PiPGM2/playlist/order", payload: { itemIds: [] } });
+    const over = await app.inject({ method: "POST", url, payload: { name: "Sunnuntai", playlistId: saved.json().id } });
+    assert.equal(over.statusCode, 200);
+    assert.equal(over.json().id, saved.json().id);
+    assert.equal(over.json().items.length, 0);
+    assert.equal((await app.inject({ method: "POST", url, payload: { name: "x", playlistId: "pl-000000000000" } })).statusCode, 404);
+    assert.equal((await app.inject({ method: "POST", url, payload: { name: "x", playlistId: "junk" } })).statusCode, 422);
+    assert.equal((await app.inject({ method: "POST", url: "/api/v1/pipgm/pipelines/PiPGM9/playlist/save", payload: { name: "x" } })).statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});
+
+test("saved playlists answer 503 while the store is down", async () => {
+  const { MemoryBlobStore } = await import("./library-store.js");
+  const blobs = new MemoryBlobStore();
+  const app = buildPipgmServer({ playlistStore: blobs });
+  try {
+    blobs.failing = true;
+    const res = await app.inject({ method: "GET", url: "/api/v1/pipgm/playlists" });
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.json().error.code, "STORAGE_UNAVAILABLE");
+  } finally {
+    await app.close();
+  }
+});
