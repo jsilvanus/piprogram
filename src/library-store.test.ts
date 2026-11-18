@@ -173,3 +173,82 @@ test("a date change on a saved item sends the item JSON but not the bytes again"
   assert.equal(store.objects.get(assetKey)!.toString(), "marker");
   assert.deepEqual(store.writeOptions.get(assetKey)?.useAt, ["2026-11-08"]);
 });
+
+test("a feed's playlist survives a restart (ids in the store, nothing goes on air)", async () => {
+  const store = new MemoryBlobStore();
+  const first = newService(store);
+  await first.loadLibrary();
+  const a = first.createHymnItem({ title: "A", stanzas: [{ lines: ["a"] }] });
+  const b = first.createHymnItem({ title: "B", stanzas: [{ lines: ["b"] }] });
+  const c = first.createHymnItem({ title: "C", stanzas: [{ lines: ["c"] }] });
+  for (const item of [a, b, c]) first.addItemToPipeline("PiPGM2", item.id);
+  first.setPlaylistOrder("PiPGM2", [c.id, a.id, b.id]);
+  first.removeItemFromPipeline("PiPGM2", b.id);
+  await first.flushLibrary();
+  assert.ok(store.objects.has("piprogram/library/live/PiPGM2.json"));
+
+  const second = newService(store);
+  assert.equal(await second.loadLibrary(), 3);
+  const pipe = second.getPipeline("PiPGM2")!;
+  assert.deepEqual(pipe.playlist.map((i) => i.title), ["C", "A"]);
+  assert.equal(pipe.activeItemId, null);
+  assert.equal(second.getPipeline("PiPGM1")!.playlist.length, 0);
+});
+
+test("a stored playlist skips items that are gone, and a feed that changed before the load keeps its own list", async () => {
+  const store = new MemoryBlobStore();
+  const first = newService(store);
+  await first.loadLibrary();
+  const a = first.createHymnItem({ title: "A", stanzas: [{ lines: ["a"] }] });
+  const b = first.createHymnItem({ title: "B", stanzas: [{ lines: ["b"] }] });
+  first.addItemToPipeline("PiPGM1", a.id);
+  first.addItemToPipeline("PiPGM1", b.id);
+  first.addItemToPipeline("PiPGM3", a.id);
+  await first.flushLibrary();
+  await first.deleteLibraryItem(b.id);
+  await first.flushLibrary();
+  store.objects.set("piprogram/library/live/PiPGM1.json", Buffer.from(JSON.stringify({ schema: "piprogram.live-playlist/1", itemIds: [a.id, b.id], savedAt: "x" })));
+
+  const second = newService(store);
+  second.addItemToPipeline("PiPGM3", "none"); // unknown id: no change, nothing marked
+  const skipped: string[] = [];
+  await second.loadLibrary((key) => skipped.push(key));
+  assert.deepEqual(second.getPipeline("PiPGM1")!.playlist.map((i) => i.title), ["A"]);
+  assert.deepEqual(skipped, ["live/PiPGM1"]);
+  assert.deepEqual(second.getPipeline("PiPGM3")!.playlist.map((i) => i.title), ["A"]);
+});
+
+test("playlist changes made before the store has been read are written once it has, without overwriting what was stored", async () => {
+  const store = new MemoryBlobStore();
+  const first = newService(store);
+  await first.loadLibrary();
+  const a = first.createHymnItem({ title: "A", stanzas: [{ lines: ["a"] }] });
+  first.addItemToPipeline("PiPGM1", a.id);
+  await first.flushLibrary();
+
+  const second = newService(store);
+  store.failing = true;
+  await assert.rejects(second.loadLibrary());
+  store.failing = false;
+  // down at start: the service has not read the store, so nothing is written yet (the stored list stays)
+  second.removeItemFromPipeline("PiPGM1", "x");
+  await second.flushLibrary();
+  assert.deepEqual(JSON.parse(store.objects.get("piprogram/library/live/PiPGM1.json")!.toString()).itemIds, [a.id]);
+  await second.loadLibrary();
+  assert.deepEqual(second.getPipeline("PiPGM1")!.playlist.map((i) => i.id), [a.id]);
+});
+
+test("a playlist write while the store is down is retried", async () => {
+  const store = new MemoryBlobStore();
+  const service = newService(store);
+  await service.loadLibrary();
+  const a = service.createHymnItem({ title: "A", stanzas: [{ lines: ["a"] }] });
+  await service.flushLibrary();
+  store.failing = true;
+  service.addItemToPipeline("PiPGM1", a.id);
+  await sleep(10);
+  assert.equal(await service.flushLibrary() > 0, true);
+  store.failing = false;
+  assert.equal(await service.flushLibrary(), 0);
+  assert.deepEqual(JSON.parse(store.objects.get("piprogram/library/live/PiPGM1.json")!.toString()).itemIds, [a.id]);
+});
