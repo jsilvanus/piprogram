@@ -1079,6 +1079,36 @@ export class PiPgmService {
     return snapshot;
   }
 
+  /**
+   * Replaces or reorders the playlist in one step. `itemIds` becomes the whole playlist, in that order
+   * (items that were not in it are added, items left out are removed). Nothing changes when an id is
+   * unknown or repeated. The active item and its step stay when the item is still in the list; if it
+   * is not (or nothing was active), the first item becomes active, as when an item is added or removed.
+   */
+  setPlaylistOrder(
+    pipelineId: string,
+    itemIds: readonly string[]
+  ): PiPgmPipelineSnapshot | { error: "UNKNOWN_ITEMS" | "DUPLICATE_ITEMS"; ids: string[] } | undefined {
+    const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
+    if (!state) return undefined;
+    const unknown = itemIds.filter((id) => !this.library.has(id));
+    if (unknown.length > 0) return { error: "UNKNOWN_ITEMS", ids: [...new Set(unknown)] };
+    const seen = new Set<string>();
+    const duplicates = itemIds.filter((id) => (seen.has(id) ? true : (seen.add(id), false)));
+    if (duplicates.length > 0) return { error: "DUPLICATE_ITEMS", ids: [...new Set(duplicates)] };
+
+    state.playlist = itemIds.map((id) => structuredClone(this.library.get(id)!));
+    if (state.activeItemId === null ? state.playlist.length > 0 : !seen.has(state.activeItemId)) {
+      state.activeItemId = state.playlist[0]?.id ?? null;
+      state.currentStep = 0;
+      state.playbackState = "stopped";
+    }
+
+    const snapshot = this.toSnapshot(state);
+    this.emitPipelineEvent("playlist:order", snapshot);
+    return snapshot;
+  }
+
   removeItemFromPipeline(pipelineId: string, itemId: string): PiPgmPipelineSnapshot | undefined {
     const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
     if (!state) return undefined;

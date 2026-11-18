@@ -505,6 +505,90 @@ paths:
                 $ref: "#/components/schemas/Pipeline"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/pipgm/pipelines/{pipelineId}/playlist/order:
+    put:
+      operationId: setPlaylistOrder
+      tags: [Pipelines]
+      summary: Replace or reorder the playlist atomically
+      description: >
+        `itemIds` becomes the whole playlist in that order. Items left out are removed, new ones added.
+        The active item keeps its place when it is still in the list. 422 when an id is not in the
+        library or is listed twice; nothing changes then.
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [itemIds]
+              properties:
+                itemIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Pipeline with the new playlist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pipeline"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/pipelines/{pipelineId}/playlist/steps:
+    get:
+      operationId: listPlaylistSteps
+      tags: [Pipelines]
+      summary: The playlist flattened to one ordered list of steps, with thumbnails where prepared
+      parameters:
+        - $ref: "#/components/parameters/PipelineId"
+      responses:
+        "200":
+          description: Steps of every playlist item in order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pipelineId, orientation, activeItemId, currentStep, steps]
+                properties:
+                  pipelineId:
+                    type: string
+                  orientation:
+                    type: string
+                  activeItemId:
+                    type: string
+                    nullable: true
+                  currentStep:
+                    type: integer
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      required: [itemId, itemIndex, itemTitle, itemKind, stepIndex, label, thumbnailUrl, isActive]
+                      properties:
+                        itemId:
+                          type: string
+                        itemIndex:
+                          type: integer
+                        itemTitle:
+                          type: string
+                        itemKind:
+                          type: string
+                        stepIndex:
+                          type: integer
+                        label:
+                          type: string
+                        thumbnailUrl:
+                          type: string
+                          nullable: true
+                        isActive:
+                          type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/pipgm/pipelines/{pipelineId}/playlist/{itemId}:
     delete:
       operationId: removePlaylistItem

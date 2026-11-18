@@ -28,6 +28,7 @@ A host that embeds piprogram must provide objects that satisfy these interfaces.
 `pnpm start` runs the PiPGM API (`PIPGM_PORT`, default 3200; `PIPGM_HOST`, default 127.0.0.1; `PIPGM_API_KEY` required for any non-loopback host). Routes and error shapes match the old pimatrix `/api/v1/pipgm/*` routes, so clients keep working; the contract is `openapi/openapi.yaml`.
 
 - Pipelines: list, read, config, control, ftb, audio, playlist add/remove
+- Playlist: `GET /pipelines/:id/playlist/steps` lists every step of the playlist in order (item, step, label, `thumbnailUrl` when prepared, `isActive`); `PUT /pipelines/:id/playlist/order {itemIds}` replaces or reorders it atomically (422 `UNKNOWN_ITEMS` / `DUPLICATE_ITEMS`, nothing changes then; the active item stays when it is still listed)
 - Library items: list, read, hymn, YouTube, media, PPTX, asset bytes
 - Stage page: `GET /pipgm/:pipelineId/stage`
 - Slide frame: `GET /api/v1/pipgm/pipelines/:pipelineId/frame.png?width=&height=&alpha=` renders the current stage as a PNG (default size = the pipeline resolution). `alpha=1` leaves the stage background out, so the picture keeps alpha. It needs a headless Chromium: `PIPGM_CHROMIUM` (default `chromium`; `PIPGM_CHROMIUM_NO_SANDBOX=1` only when running as root). Without one it answers 503. A fade to black is not applied to the picture; read `fadeToBlack` from the pipeline.
