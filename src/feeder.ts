@@ -265,6 +265,7 @@ export function pictureKey(snapshot: PiPgmPipelineSnapshot): string {
     snapshot.activeItemId ?? "",
     snapshot.currentStep,
     snapshot.fadeToBlack ? "ftb" : "",
+    snapshot.keyColor ?? "",
     snapshot.basicImageItemId ?? "",
     snapshot.resolution.width,
     snapshot.resolution.height
@@ -334,17 +335,18 @@ export class PipgmFeeders {
       if (snapshot.fadeToBlack) {
         png = solidPng(width, height);
       } else {
-        const prepared = await this.options.steps?.lookup(snapshot);
+        // Prepared pictures carry the normal stage background; a keyed feed renders its own.
+        const prepared = snapshot.keyColor ? null : await this.options.steps?.lookup(snapshot);
         if (prepared) {
           png = prepared;
         } else {
           png = await this.options.renderFrame({
-            html: renderPiPgmStageHtml(snapshot, { transparent: false, silent: true }),
+            html: renderPiPgmStageHtml(snapshot, { transparent: false, silent: true, keyColor: snapshot.keyColor }),
             width,
             height,
             transparent: false
           });
-          void this.options.steps?.remember(snapshot, png);
+          if (!snapshot.keyColor) void this.options.steps?.remember(snapshot, png);
         }
       }
       this.feeders.get(id)!.show(png, width, height);

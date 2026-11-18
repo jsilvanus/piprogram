@@ -36,7 +36,7 @@ import {
 } from "./pipgm-model.js";
 import { createTtsEngineFromEnv, readWavInfo, VOICE_NAME, type TtsEngine } from "./tts.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assetsOfEntry, LibraryPersistence } from "./library-store.js";
@@ -50,6 +50,8 @@ interface PipelineInternalState {
   orientation: PiPgmOrientation;
   fadeToBlack: boolean;
   fadeDurationMs: number;
+  /** Chroma key colour (#rrggbb) that fills the stage background and transparent areas; null = normal background. */
+  keyColor: string | null;
   audioEnabled: boolean;
   /** Epoch ms when the arming ends; null while disarmed. */
   audioArmedUntil: number | null;
@@ -68,6 +70,12 @@ interface PipelineInternalState {
    */
   carriedItemId: string | null;
   stream: ManagedStreamSnapshot;
+}
+
+/** `#rrggbb` (lower-cased). Throws on anything else. */
+export function normalizeKeyColor(value: string): string {
+  if (!/^#[0-9a-fA-F]{6}$/.test(value)) throw new Error("keyColor must be #rrggbb");
+  return value.toLowerCase();
 }
 
 const USE_AT_ZONE = process.env.PIPGM_TIMEZONE?.trim() || DEFAULT_TIMEZONE;
@@ -306,6 +314,7 @@ export class PiPgmService {
       this.ttsDir = join(options.cacheDir, "tts");
       mkdirSync(this.ttsDir, { recursive: true });
       this.loadPrepared();
+      this.feedSettingsPath = join(options.cacheDir, "feed-settings.json");
     }
 
     for (const def of pipgmPipelineDefinitions) {
@@ -316,6 +325,7 @@ export class PiPgmService {
         orientation: def.defaultOrientation,
         fadeToBlack: false,
         fadeDurationMs: 500,
+        keyColor: null,
         audioEnabled: false, // Muted by default ("usually we work muted, but sometimes sound is required")
         audioArmedUntil: null,
         audioArmTimer: null,
@@ -337,6 +347,7 @@ export class PiPgmService {
         }
       });
     }
+    this.loadFeedSettings();
   }
 
   private nextId(prefix: string): string {
@@ -567,6 +578,7 @@ export class PiPgmService {
       hidden: false,
       orientation,
       fadeToBlack: false,
+      keyColor: null,
       fadeDurationMs: 0,
       audioEnabled: false,
       audioArmedUntil: null,
@@ -595,6 +607,7 @@ export class PiPgmService {
       hidden?: boolean;
       linked?: boolean;
       fadeDurationMs?: number;
+      keyColor?: string | null;
     }
   ): PiPgmPipelineSnapshot | undefined {
     const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
@@ -611,6 +624,10 @@ export class PiPgmService {
     }
     if (patch.fadeDurationMs !== undefined) {
       state.fadeDurationMs = Math.max(0, Math.min(10000, Math.round(patch.fadeDurationMs)));
+    }
+    if (patch.keyColor !== undefined) {
+      state.keyColor = patch.keyColor === null ? null : normalizeKeyColor(patch.keyColor);
+      this.saveFeedSettings();
     }
 
     const snapshot = this.toSnapshot(state);
@@ -915,6 +932,39 @@ export class PiPgmService {
   }
 
   /** Reads the cache directory at start. Entries whose files are missing or changed are ignored; the limits apply as usual. */
+  private feedSettingsPath: string | undefined;
+
+  /** Reads the stored per-feed settings (key colour). A missing or broken file means defaults. */
+  private loadFeedSettings(): void {
+    if (!this.feedSettingsPath || !existsSync(this.feedSettingsPath)) return;
+    try {
+      const data = JSON.parse(readFileSync(this.feedSettingsPath, "utf8")) as Record<string, { keyColor?: unknown }>;
+      for (const state of this.pipelines.values()) {
+        const key = data[state.id]?.keyColor;
+        if (typeof key === "string") {
+          try {
+            state.keyColor = normalizeKeyColor(key);
+          } catch {
+            // an invalid stored value is ignored
+          }
+        }
+      }
+    } catch {
+      // unreadable settings: defaults
+    }
+  }
+
+  private saveFeedSettings(): void {
+    if (!this.feedSettingsPath) return;
+    const data: Record<string, { keyColor: string | null }> = {};
+    for (const state of this.pipelines.values()) data[state.id] = { keyColor: state.keyColor };
+    try {
+      writeFileSync(this.feedSettingsPath, JSON.stringify(data, null, 2), "utf8");
+    } catch {
+      // the setting still works in memory
+    }
+  }
+
   private loadPrepared(): void {
     if (!this.ttsDir) return;
     const metas: PreparedMeta[] = [];
@@ -1944,6 +1994,7 @@ export class PiPgmService {
       state: pipelineState,
       fadeToBlack: state.fadeToBlack,
       fadeDurationMs: state.fadeDurationMs,
+      keyColor: state.keyColor,
       audioEnabled: state.audioEnabled,
       audioArmedUntil: state.audioArmedUntil === null ? null : new Date(state.audioArmedUntil).toISOString(),
       volume: state.volume,

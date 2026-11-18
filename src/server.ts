@@ -431,7 +431,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   app.put<{
     Params: { pipelineId: string };
-    Body: { orientation?: unknown; hidden?: unknown; linked?: unknown; fadeDurationMs?: unknown };
+    Body: { orientation?: unknown; hidden?: unknown; linked?: unknown; fadeDurationMs?: unknown; keyColor?: unknown };
   }>("/api/v1/pipgm/pipelines/:pipelineId/config", async (request, reply) => {
     if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
     const body = request.body ?? {};
@@ -453,7 +453,11 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     ) {
       return invalid(reply, "INVALID_FADE_DURATION", "fadeDurationMs must be between 0 and 10000");
     }
+    if (body.keyColor !== undefined && body.keyColor !== null && (typeof body.keyColor !== "string" || !/^#[0-9a-fA-F]{6}$/.test(body.keyColor))) {
+      return invalid(reply, "INVALID_KEY_COLOR", "keyColor must be #rrggbb or null");
+    }
     const updated = service.updatePipelineConfig(request.params.pipelineId, {
+      ...(body.keyColor !== undefined ? { keyColor: body.keyColor as string | null } : {}),
       ...(body.orientation !== undefined ? { orientation: body.orientation as PiPgmOrientation } : {}),
       ...(body.hidden !== undefined ? { hidden: body.hidden as boolean } : {}),
       ...(body.linked !== undefined ? { linked: body.linked as boolean } : {}),

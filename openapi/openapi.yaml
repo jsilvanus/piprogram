@@ -149,6 +149,11 @@ paths:
                   type: number
                   minimum: 0
                   maximum: 10000
+                keyColor:
+                  type: string
+                  nullable: true
+                  pattern: "^#[0-9a-fA-F]{6}$"
+                  description: Chroma key colour for ATEM feeds. The stage background and transparent areas of the content are filled with it. null = normal background (projectors). Persisted.
       responses:
         "200":
           description: Updated pipeline
@@ -1572,6 +1577,10 @@ components:
       type: object
       description: Pipeline snapshot; fields as returned by the service (additionalProperties allowed)
       properties:
+        keyColor:
+          type: string
+          nullable: true
+          description: Chroma key colour (#rrggbb) of the feed, null = normal background
         slideFeed:
           $ref: "#/components/schemas/SlideFeed"
       additionalProperties: true

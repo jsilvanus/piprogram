@@ -33,6 +33,7 @@ const USAGE = `Usage: piprogram <command>
   audio kill   (silence and disarm every pipeline)
   feeders   (state of the feed publishers to MediaMTX)
   pipelines orientation <pipelineId> <landscape|portrait>
+  pipelines key <pipelineId> <#rrggbb|green|blue|off>   (chroma key colour for ATEM feeds; off = normal background)
   pipelines playlist add <pipelineId> <itemId> [--cue]
   pipelines playlist remove <pipelineId> <itemId>
   pipelines playlist steps <pipelineId>   (every step of the playlist in order)
@@ -230,6 +231,17 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       if (value !== "landscape" && value !== "portrait") throw new Error("orientation must be landscape or portrait");
       await PipelinesService.updatePipelineConfig(id, { orientation: value });
       io.out(`${id}: orientation ${value}`);
+      return 0;
+    }
+    if (group === "pipelines" && action === "key") {
+      const id = pipelineArg(rest[0]);
+      const named: Record<string, string | null> = { green: "#00b140", blue: "#0047bb", off: null };
+      const raw = rest[1];
+      if (!raw) throw new Error("key colour is required (#rrggbb, green, blue or off)");
+      const value = raw in named ? named[raw]! : raw;
+      if (value !== null && !/^#[0-9a-fA-F]{6}$/.test(value)) throw new Error("key colour must be #rrggbb, green, blue or off");
+      await PipelinesService.updatePipelineConfig(id, { keyColor: value });
+      io.out(`${id}: key colour ${value ?? "off"}`);
       return 0;
     }
     if (group === "pipelines" && action === "playlist" && rest[0] === "add") {

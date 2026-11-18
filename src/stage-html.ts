@@ -14,6 +14,19 @@ export interface PiPgmStageHtmlOptions {
   transparent?: boolean;
   /** Never play sound: not the audio track, and video items stay muted (frame screenshots, still renders, previews). */
   silent?: boolean;
+  /**
+   * Chroma key colour (#rrggbb). The stage background, and so every transparent area of the content
+   * (alpha PNGs, letterbox bars), shows this colour. Used for ATEM feeds; projector feeds leave it out.
+   */
+  keyColor?: string | null;
+}
+
+function keyStyle(color: string | null | undefined): string {
+  if (!color || !/^#[0-9a-fA-F]{6}$/.test(color)) return "";
+  return `  <style>
+    html, body, #stage-root, #stage-content, .stage-image, .stage-video { background: ${color} !important; }
+  </style>
+`;
 }
 
 const TRANSPARENT_STYLE = `  <style>
@@ -168,7 +181,7 @@ export function renderPiPgmStageHtml(pipeline: PiPgmPipelineSnapshot, options: P
       to { opacity: 1; transform: translateY(0); }
     }
   </style>
-${options.transparent ? TRANSPARENT_STYLE : ""}</head>
+${options.transparent ? TRANSPARENT_STYLE : keyStyle(options.keyColor)}</head>
 <body>
   <div id="stage-root" data-pipeline="${escapeHtml(pipeline.id)}" data-orientation="${escapeHtml(pipeline.orientation)}">
     <div id="stage-content"></div>
