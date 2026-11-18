@@ -387,3 +387,30 @@ test("playlists/generate drafts a day from useAt: hymns first, then by time, not
     await app.close();
   }
 });
+
+test("pauses and auto-advance seconds are kept in a saved playlist; a load skips the pauses and says so", async () => {
+  const app = buildPipgmServer();
+  try {
+    const a = await hymnItem(app, "A");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/pipgm/playlists",
+      payload: { name: "Timed", items: [{ itemId: a, advanceSeconds: 45 }, { pause: true, label: "Sermon" }] }
+    });
+    assert.equal(created.statusCode, 201);
+    const id = created.json().id as string;
+    assert.deepEqual((await app.inject({ method: "GET", url: `/api/v1/pipgm/playlists/${id}` })).json().items, [
+      { itemId: a, advanceSeconds: 45 },
+      { pause: true, label: "Sermon" }
+    ]);
+    const loaded = await app.inject({ method: "POST", url: "/api/v1/pipgm/pipelines/PiPGM1/playlist/load", payload: { playlistId: id } });
+    assert.equal(loaded.statusCode, 200);
+    assert.deepEqual(loaded.json().report.skipped, [{ index: 1, reason: "pause-not-supported" }]);
+    assert.deepEqual(loaded.json().report.missing, []);
+    assert.deepEqual(loaded.json().pipeline.playlist.map((i: { id: string }) => i.id), [a]);
+    const bad = await app.inject({ method: "POST", url: "/api/v1/pipgm/playlists", payload: { name: "x", items: [{ pause: true, itemId: a }] } });
+    assert.equal(bad.statusCode, 422);
+  } finally {
+    await app.close();
+  }
+});
