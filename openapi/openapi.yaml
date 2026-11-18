@@ -650,6 +650,46 @@ paths:
           $ref: "#/components/responses/Invalid"
         "503":
           $ref: "#/components/responses/StorageUnavailable"
+  /api/v1/pipgm/playlists/generate:
+    post:
+      operationId: generatePlaylistDraft
+      tags: [Playlists]
+      summary: A draft playlist for a day from the items' useAt dates
+      description: >
+        Items whose `useAt` overlaps the day, ordered hymns, slide decks, Canva, images, video and anything else
+        (audio is left out), then by time of day and age. Nothing is saved or loaded: the draft has the shape of
+        a playlist document and can be edited, saved (POST /playlists) or loaded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties:
+                date:
+                  type: string
+                  example: "2026-11-22"
+                name:
+                  type: string
+                orientation:
+                  type: string
+                  enum: [landscape, portrait]
+      responses:
+        "200":
+          description: The draft
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [date, draft]
+                properties:
+                  date:
+                    type: string
+                  draft:
+                    $ref: "#/components/schemas/PlaylistInput"
+        "422":
+          $ref: "#/components/responses/Invalid"
   /api/v1/pipgm/playlists/{playlistId}:
     parameters:
       - in: path

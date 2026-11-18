@@ -1,4 +1,4 @@
-import { DEFAULT_TIMEZONE, parseUseAt } from "./use-at.js";
+import { DEFAULT_TIMEZONE, parseUseAt, UseAtError, useAtIntervals } from "./use-at.js";
 import { PiSwitchClient, type SlideAdvanceResult } from "./piswitch-client.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import type { PipgmFrameRenderer } from "./frame.js";
@@ -1167,6 +1167,32 @@ export class PiPgmService {
     const snapshot = this.toSnapshot(state);
     this.emitPipelineEvent("playlist:add", snapshot);
     return snapshot;
+  }
+
+  /**
+   * The library items meant for a day (their `useAt` overlaps it), in service order: hymns, then slide decks,
+   * Canva, images, video, and last anything else (audio is left out: it plays through the audio route, not the
+   * playlist). Within a group by the earliest time of the day, then by age. Changes nothing.
+   */
+  itemsForDate(date: string): PiPgmItem[] {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new UseAtError(`date must be YYYY-MM-DD: ${date}`);
+    const [day] = useAtIntervals([date], USE_AT_ZONE);
+    if (!day) throw new UseAtError(`date must be YYYY-MM-DD: ${date}`);
+    const rank: Record<string, number> = { hymn: 0, pptx: 1, canva: 2, image: 3, video: 4, youtube: 4 };
+    const hits: Array<{ item: PiPgmItem; from: number }> = [];
+    for (const item of this.library.values()) {
+      if (item.kind === "audio" || !item.useAt?.length) continue;
+      const overlaps = useAtIntervals(item.useAt, USE_AT_ZONE).filter((i) => i.from <= day.to && i.to >= day.from);
+      if (overlaps.length > 0) hits.push({ item, from: Math.min(...overlaps.map((i) => Math.max(i.from, day.from))) });
+    }
+    hits.sort(
+      (a, b) =>
+        (rank[a.item.kind] ?? 5) - (rank[b.item.kind] ?? 5) ||
+        a.from - b.from ||
+        a.item.createdAt.localeCompare(b.item.createdAt) ||
+        a.item.id.localeCompare(b.item.id)
+    );
+    return hits.map((h) => structuredClone(h.item));
   }
 
   /** Removes the item carried over from a loaded playlist once the feed has moved off it. */

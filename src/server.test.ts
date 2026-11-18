@@ -356,3 +356,34 @@ test("playlist/load appends without duplicates, and refuses bad requests", async
     await app.close();
   }
 });
+
+test("playlists/generate drafts a day from useAt: hymns first, then by time, nothing saved", async () => {
+  const app = buildPipgmServer();
+  try {
+    const make = async (title: string, useAt: string) => {
+      const id = await hymnItem(app, title);
+      await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${id}/use-at`, payload: { useAt } });
+      return id;
+    };
+    const late = await make("Late", "2026-11-22T11:30");
+    const early = await make("Early", "2026-11-22T09");
+    const range = await make("Range", "2026-11-20/2026-11-23");
+    await make("Other day", "2026-11-29");
+    await hymnItem(app, "No date");
+    const img = (await app.inject({ method: "POST", url: "/api/v1/pipgm/items/media", payload: { kind: "image", filename: "a.png", dataBase64: "AA==" } })).json().id as string;
+    await app.inject({ method: "PUT", url: `/api/v1/pipgm/items/${img}/use-at`, payload: { useAt: "2026-11-22" } });
+
+    const res = await app.inject({ method: "POST", url: "/api/v1/pipgm/playlists/generate", payload: { date: "2026-11-22", orientation: "portrait" } });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().draft.orientation, "portrait");
+    assert.equal(res.json().draft.name, "Draft 2026-11-22");
+    // hymns by time of day (the range starts at the day's beginning), the image last
+    assert.deepEqual(res.json().draft.items.map((i: { itemId: string }) => i.itemId), [range, early, late, img]);
+    assert.equal((await app.inject({ method: "GET", url: "/api/v1/pipgm/playlists" })).json().items.length, 0);
+
+    assert.equal((await app.inject({ method: "POST", url: "/api/v1/pipgm/playlists/generate", payload: {} })).json().error.code, "DATE_REQUIRED");
+    assert.equal((await app.inject({ method: "POST", url: "/api/v1/pipgm/playlists/generate", payload: { date: "22.11.2026" } })).json().error.code, "INVALID_DATE");
+  } finally {
+    await app.close();
+  }
+});
