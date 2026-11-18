@@ -5,7 +5,7 @@
  */
 
 import { readFile, writeFile } from "node:fs/promises";
-import { ApiError, ItemsService, OpenAPI, PipelinesService } from "./generated/index.js";
+import { ApiError, ItemsService, OpenAPI, PipelinesService, PlaylistsService } from "./generated/index.js";
 import { PipgmPipelineId as PipelineId } from "./generated/index.js";
 
 export interface CliIo {
@@ -35,6 +35,16 @@ const USAGE = `Usage: piprogram <command>
   pipelines orientation <pipelineId> <landscape|portrait>
   pipelines playlist add <pipelineId> <itemId> [--cue]
   pipelines playlist remove <pipelineId> <itemId>
+  pipelines playlist steps <pipelineId>   (every step of the playlist in order)
+  pipelines playlist order <pipelineId> <itemId>...   (replace or reorder the playlist; no ids clears it)
+  playlists list
+  playlists get <playlistId>
+  playlists save <pipelineId> <name> [--id <playlistId>]   (save a feed's playlist; --id replaces a saved one)
+  playlists load <pipelineId> <playlistId> [--append] [--strict]   (what is on air is not touched)
+  playlists export <playlistId> [--out <file.json>]
+  playlists import <file.json> [--name <name>]
+  playlists generate <YYYY-MM-DD> [--name <name>] [--out <file.json>]   (a draft from the items' useAt dates; not saved)
+  playlists delete <playlistId>
   items list
   items show <itemId>
   items youtube <urlOrId> [--target <pipelineId>] [--cue]
@@ -234,6 +244,98 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       if (!rest[2]) throw new Error("itemId is required");
       await PipelinesService.removePlaylistItem(id, rest[2]);
       io.out(`${id}: removed ${rest[2]}`);
+      return 0;
+    }
+    if (group === "pipelines" && action === "playlist" && rest[0] === "steps") {
+      const list = await PipelinesService.listPlaylistSteps(pipelineArg(rest[1]));
+      for (const step of list.steps) {
+        io.out(`${step.isActive ? "*" : " "} ${step.itemIndex}.${step.stepIndex} ${step.itemId} ${step.itemKind} ${step.itemTitle} - ${step.label}${step.thumbnailUrl ? "" : " (no thumbnail)"}`);
+      }
+      return 0;
+    }
+    if (group === "pipelines" && action === "playlist" && rest[0] === "order") {
+      const id = pipelineArg(rest[1]);
+      await PipelinesService.setPlaylistOrder(id, { itemIds: rest.slice(2) });
+      io.out(`${id}: playlist set to ${rest.length - 2} item(s)`);
+      return 0;
+    }
+    if (group === "playlists" && action === "list") {
+      for (const p of (await PlaylistsService.listSavedPlaylists()).items) {
+        io.out(`${p.id}  ${p.savedAt}  ${p.itemCount} item(s)  ${p.name}`);
+      }
+      return 0;
+    }
+    if (group === "playlists" && action === "get") {
+      if (!rest[0]) throw new Error("playlistId is required");
+      io.out(JSON.stringify(await PlaylistsService.getSavedPlaylist(rest[0]), null, 2));
+      return 0;
+    }
+    if (group === "playlists" && action === "save") {
+      const id = pipelineArg(rest[0]);
+      const name = rest[1];
+      if (!name || name.startsWith("--")) throw new Error("usage: playlists save <pipelineId> <name> [--id <playlistId>]");
+      const playlistId = flag(rest, "--id");
+      const saved = await PlaylistsService.savePipelinePlaylist(id, { name, ...(playlistId !== undefined ? { playlistId } : {}) });
+      io.out(`${saved.id} (${saved.items.length} item(s))`);
+      return 0;
+    }
+    if (group === "playlists" && action === "load") {
+      const id = pipelineArg(rest[0]);
+      if (!rest[1] || rest[1].startsWith("--")) throw new Error("playlistId is required");
+      const { pipeline, report } = await PlaylistsService.loadSavedPlaylist(id, {
+        playlistId: rest[1],
+        mode: hasFlag(rest, "--append") ? "append" : "replace",
+        ...(hasFlag(rest, "--strict") ? { strict: true } : {})
+      });
+      io.out(`${id}: ${report.mode}, ${report.resolved.length} found, ${report.missing.length} missing, ${report.duplicates.length} already listed`);
+      for (const m of report.missing) io.out(`  missing: ${m.itemId}${m.title ? ` "${m.title}"` : ""}`);
+      if (report.keptActiveItemId) {
+        io.out(`  on air: ${report.keptActiveItemId} stays${report.carriedActiveItem ? " (not in the new list; carried until the feed moves on)" : ""}`);
+      }
+      io.out(`  playlist: ${pipeline.playlist.map((i: { id: string }) => i.id).join(", ") || "(empty)"}`);
+      return 0;
+    }
+    if (group === "playlists" && action === "export") {
+      if (!rest[0]) throw new Error("playlistId is required");
+      const { id: _id, ...document } = await PlaylistsService.getSavedPlaylist(rest[0]);
+      const text = JSON.stringify(document, null, 2) + "\n";
+      const out = flag(rest, "--out");
+      if (out) {
+        await writeFile(out, text);
+        io.out(`wrote ${out}`);
+      } else io.out(text.trimEnd());
+      return 0;
+    }
+    if (group === "playlists" && action === "import") {
+      const file = rest[0];
+      if (!file || file.startsWith("--")) throw new Error("usage: playlists import <file.json> [--name <name>]");
+      let document: Record<string, unknown>;
+      try {
+        document = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+      } catch (error) {
+        throw new Error(`cannot read ${file}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const name = flag(rest, "--name");
+      const saved = await PlaylistsService.createSavedPlaylist({ ...document, ...(name ? { name } : {}) } as never);
+      io.out(`${saved.id} (${saved.items.length} item(s))`);
+      return 0;
+    }
+    if (group === "playlists" && action === "generate") {
+      const date = rest[0];
+      if (!date || date.startsWith("--")) throw new Error("usage: playlists generate <YYYY-MM-DD> [--name <name>] [--out <file.json>]");
+      const name = flag(rest, "--name");
+      const { draft } = await PlaylistsService.generatePlaylistDraft({ date, ...(name ? { name } : {}) });
+      const out = flag(rest, "--out");
+      if (out) {
+        await writeFile(out, JSON.stringify(draft, null, 2) + "\n");
+        io.out(`wrote ${out} (${draft.items.length} item(s))`);
+      } else io.out(JSON.stringify(draft, null, 2));
+      return 0;
+    }
+    if (group === "playlists" && action === "delete") {
+      if (!rest[0]) throw new Error("playlistId is required");
+      await PlaylistsService.deleteSavedPlaylist(rest[0]);
+      io.out(`deleted ${rest[0]}`);
       return 0;
     }
     if (group === "items" && action === "list") {

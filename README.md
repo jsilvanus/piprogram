@@ -120,6 +120,8 @@ Screenshots of the stage page now carry a `<base href>` pointing at this server 
 
 The generated client reads every non-JSON body as text, so it cannot return the frame PNG intact. `piprogram pipelines frame <id> --out file.png [--width n] [--height n] [--alpha]` fetches the frame route directly instead.
 
+Playlists from the CLI: `piprogram playlists list|get|save|load|export|import|generate|delete` and `piprogram pipelines playlist steps|order` (see `piprogram help`). `export` writes the `piprogram.playlist/1` document without its id, `import` makes a new saved playlist from such a file, so playlists can move between Pis.
+
 ## Still in pimatrix
 
 Until the Pi switches over, pimatrix still mounts the old `/api/v1/pipgm/*` routes. They can go once picontrol points at this API.
