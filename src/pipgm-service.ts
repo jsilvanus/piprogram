@@ -80,6 +80,8 @@ export interface LoadReport {
   missing: Array<{ index: number; itemId: string; kind?: string; title?: string; hymn?: { number: number | string } }>;
   /** Entries left out because the item was already in the list. */
   duplicates: Array<{ index: number; itemId: string }>;
+  /** Entries that were not acted on: pause markers (stored in saved playlists, not supported on a feed yet). */
+  skipped: Array<{ index: number; reason: "pause-not-supported" }>;
   /** The item that stayed on air (replace only), or null when nothing was active. */
   keptActiveItemId: string | null;
   /** True when that item is not in the new list and is carried until the feed moves on. */
@@ -1205,7 +1207,7 @@ export class PiPgmService {
 
   /** The library item a saved entry stands for: by id, else the newest item of the same kind and title, else a hymn of that number. */
   private resolveSavedItem(entry: SavedPlaylistItem): { item: PiPgmItem; by: "id" | "kindTitle" | "hymnNumber" } | null {
-    const byId = this.library.get(entry.itemId);
+    const byId = entry.itemId ? this.library.get(entry.itemId) : undefined;
     if (byId) return { item: byId, by: "id" };
     const newest = (items: PiPgmItem[]): PiPgmItem | undefined =>
       items.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0];
@@ -1246,12 +1248,17 @@ export class PiPgmService {
     const duplicates: LoadReport["duplicates"] = [];
     const chosen = new Set<string>(mode === "append" ? state.playlist.map((i) => i.id) : []);
     const items: PiPgmItem[] = [];
+    const skipped: LoadReport["skipped"] = [];
     entries.forEach((entry, index) => {
+      if (entry.pause) {
+        skipped.push({ index, reason: "pause-not-supported" });
+        return;
+      }
       const found = this.resolveSavedItem(entry);
       if (!found) {
         missing.push({
           index,
-          itemId: entry.itemId,
+          itemId: entry.itemId ?? "",
           ...(entry.kind ? { kind: entry.kind } : {}),
           ...(entry.title ? { title: entry.title } : {}),
           ...(entry.hymn ? { hymn: entry.hymn } : {})
@@ -1294,7 +1301,7 @@ export class PiPgmService {
     this.emitPipelineEvent("playlist:load", snapshot);
     return {
       pipeline: snapshot,
-      report: { mode, resolved, missing, duplicates, keptActiveItemId, carriedActiveItem: state.carriedItemId !== null }
+      report: { mode, resolved, missing, duplicates, skipped, keptActiveItemId, carriedActiveItem: state.carriedItemId !== null }
     };
   }
 

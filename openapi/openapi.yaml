@@ -1398,7 +1398,7 @@ components:
   schemas:
     LoadReport:
       type: object
-      required: [mode, resolved, missing, duplicates, keptActiveItemId, carriedActiveItem]
+      required: [mode, resolved, missing, duplicates, skipped, keptActiveItemId, carriedActiveItem]
       properties:
         mode:
           type: string
@@ -1442,6 +1442,17 @@ components:
                 type: integer
               itemId:
                 type: string
+        skipped:
+          type: array
+          items:
+            type: object
+            required: [index, reason]
+            properties:
+              index:
+                type: integer
+              reason:
+                type: string
+                enum: [pause-not-supported]
         keptActiveItemId:
           type: string
           nullable: true
@@ -1449,10 +1460,22 @@ components:
           type: boolean
     PlaylistItem:
       type: object
-      required: [itemId]
+      description: >
+        A library item (`itemId`) or a pause marker (`pause: true`, optional `label`), never both.
+        `advanceSeconds` (items only) is the time after which the feed should move on by itself.
+        Pause markers and `advanceSeconds` are stored but not acted on yet; loading a playlist skips pauses.
       properties:
         itemId:
           type: string
+        pause:
+          type: boolean
+          enum: [true]
+        label:
+          type: string
+          maxLength: 120
+        advanceSeconds:
+          type: number
+          maximum: 3600
         kind:
           type: string
         title:

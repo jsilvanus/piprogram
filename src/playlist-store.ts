@@ -12,9 +12,19 @@ import type { PiPgmItem, PiPgmOrientation } from "./pipgm-model.js";
 export const PLAYLIST_SCHEMA = "piprogram.playlist/1";
 export const MAX_PLAYLIST_ITEMS = 500;
 export const MAX_PLAYLIST_NAME = 120;
+export const MAX_ADVANCE_SECONDS = 3600;
 
+/**
+ * One entry of a saved playlist: a library item (`itemId`) or a pause marker (`pause: true`, no item). Exactly one of
+ * the two. `advanceSeconds` (items only) says the feed should move on by itself that long after the item comes on air.
+ * Both are only stored and passed on for now: nothing on a feed acts on them yet (a load skips pause markers).
+ */
 export interface SavedPlaylistItem {
-  itemId: string;
+  itemId?: string;
+  pause?: true;
+  /** A label for a pause marker ("Sermon"). */
+  label?: string;
+  advanceSeconds?: number;
   kind?: string;
   title?: string;
   hymn?: { number: number | string };
@@ -65,9 +75,32 @@ export function validatePlaylist(input: unknown): PlaylistValidation {
   else {
     input.items.forEach((raw, i) => {
       if (!isRecord(raw)) return void errors.push(`items[${i}] must be an object`);
+      const hasItemId = raw.itemId !== undefined;
+      const isPause = raw.pause !== undefined;
+      if (isPause && raw.pause !== true) return void errors.push(`items[${i}].pause must be true`);
+      if (hasItemId === isPause) return void errors.push(`items[${i}] needs either itemId or pause: true`);
+      const item: SavedPlaylistItem = {};
+      if (isPause) {
+        item.pause = true;
+        if (raw.label !== undefined) {
+          if (typeof raw.label === "string" && raw.label.length <= 120) item.label = raw.label;
+          else errors.push(`items[${i}].label must be a string of at most 120 characters`);
+        }
+        for (const field of ["itemId", "kind", "title", "hymn", "advanceSeconds"]) {
+          if (raw[field] !== undefined) errors.push(`items[${i}].${field} cannot be set on a pause`);
+        }
+        items.push(item);
+        return;
+      }
       const itemId = typeof raw.itemId === "string" ? raw.itemId.trim() : "";
       if (!itemId) return void errors.push(`items[${i}].itemId is required`);
-      const item: SavedPlaylistItem = { itemId };
+      item.itemId = itemId;
+      if (raw.label !== undefined) errors.push(`items[${i}].label is only for a pause`);
+      if (raw.advanceSeconds !== undefined) {
+        const n = raw.advanceSeconds;
+        if (typeof n === "number" && Number.isFinite(n) && n > 0 && n <= MAX_ADVANCE_SECONDS) item.advanceSeconds = n;
+        else errors.push(`items[${i}].advanceSeconds must be a number from above 0 to ${MAX_ADVANCE_SECONDS}`);
+      }
       if (raw.kind !== undefined) {
         if (typeof raw.kind === "string" && raw.kind.length <= 40) item.kind = raw.kind;
         else errors.push(`items[${i}].kind must be a short string`);

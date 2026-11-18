@@ -59,3 +59,22 @@ test("savedItemOf records the hymn number", () => {
   const item = { id: "hymn-3", title: "Virsi 12", kind: "hymn", createdAt: "", steps: [], hymn: { hymnNumber: "12", title: "x", includeTitleSlide: false, stanzas: [] } } as never;
   assert.deepEqual(savedItemOf(item), { itemId: "hymn-3", kind: "hymn", title: "Virsi 12", hymn: { number: 12 } });
 });
+
+test("pause markers and advanceSeconds are validated and survive a save and read", async () => {
+  const good = validatePlaylist({
+    name: "P",
+    items: [{ itemId: "hymn-1", advanceSeconds: 90 }, { pause: true, label: "Sermon" }, { pause: true }]
+  });
+  assert.equal(good.ok, true);
+  const store = new PlaylistStore(new MemoryBlobStore(), "p");
+  if (good.ok) {
+    const saved = (await store.save(good.value))!;
+    assert.deepEqual((await store.get(saved.id))?.items, [{ itemId: "hymn-1", advanceSeconds: 90 }, { pause: true, label: "Sermon" }, { pause: true }]);
+  }
+  const bad = validatePlaylist({
+    name: "P",
+    items: [{}, { itemId: "a", pause: true }, { pause: false }, { pause: true, advanceSeconds: 5 }, { itemId: "a", advanceSeconds: 0 }, { itemId: "a", advanceSeconds: 5000 }, { itemId: "a", label: "x" }]
+  });
+  assert.equal(bad.ok, false);
+  if (!bad.ok) assert.equal(bad.errors.length, 7);
+});
