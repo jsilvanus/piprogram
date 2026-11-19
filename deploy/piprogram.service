@@ -1,0 +1,14 @@
+[Unit]
+Description=PiProgram Liturgy Presentation and Stage Display
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/apps/piprogram
+EnvironmentFile=%h/apps/piprogram.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/node dist/main.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
