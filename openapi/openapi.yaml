@@ -185,6 +185,9 @@ paths:
                   minimum: 0
                 itemId:
                   type: string
+                entryId:
+                  type: string
+                  description: A playlist entry (the same item can be listed twice); wins over itemId.
                 itemIndex:
                   type: integer
                   minimum: 0
@@ -567,6 +570,9 @@ paths:
                   activeItemId:
                     type: string
                     nullable: true
+                  activeEntryId:
+                    type: string
+                    nullable: true
                   currentStep:
                     type: integer
                   steps:
@@ -577,6 +583,9 @@ paths:
                       properties:
                         itemId:
                           type: string
+                        entryId:
+                          type: string
+                          nullable: true
                         itemIndex:
                           type: integer
                         itemTitle:

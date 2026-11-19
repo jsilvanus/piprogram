@@ -196,6 +196,8 @@ export interface PiPgmStepDescriptor {
 
 export interface PiPgmItem {
   id: string;
+  /** Set on a playlist entry (never on a library item): the same item can be in a playlist several times, each with its own entry id. */
+  entryId?: string;
   title: string;
   kind: PiPgmItemKind;
   createdAt: string;
@@ -264,6 +266,8 @@ export interface PiPgmPipelineSnapshot {
   basicImageUrl: string | null;
   linked: boolean;
   activeItemId: string | null;
+  /** The playlist entry on air; the item may be in the playlist more than once, so this (not the item id) says which. */
+  activeEntryId: string | null;
   activeItemIndex: number;
   currentStep: number;
   totalSteps: number;
@@ -291,6 +295,8 @@ export interface PiPgmControlRequest {
   action: PiPgmControlAction;
   stepIndex?: number;
   itemId?: string;
+  /** Go to this playlist entry (wins over itemId and itemIndex). */
+  entryId?: string;
   itemIndex?: number;
   advanceItemOnEnd?: boolean;
   sync?: boolean;

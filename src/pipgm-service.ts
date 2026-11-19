@@ -35,7 +35,7 @@ import {
   type PptxAnimationEffect
 } from "./pipgm-model.js";
 import { createTtsEngineFromEnv, readWavInfo, VOICE_NAME, type TtsEngine } from "./tts.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -61,11 +61,12 @@ interface PipelineInternalState {
   volume: number;
   linked: boolean;
   activeItemId: string | null;
+  activeEntryId: string | null;
   currentStep: number;
   playbackState: PiPgmPlaybackState;
   playlist: PiPgmItem[];
   /**
-   * An item that stays on air after a playlist was loaded over it although the new list does not hold it. It sits
+   * The entry (entryId) of an item that stays on air after a playlist was loaded over it although the new list does not hold it. It sits
    * first in `playlist` until the feed moves off it, and is then removed. Never stored.
    */
   carriedItemId: string | null;
@@ -334,6 +335,7 @@ export class PiPgmService {
         volume: 100,
         linked: false,
         activeItemId: null,
+        activeEntryId: null,
         currentStep: 0,
         playbackState: "stopped",
         playlist: [],
@@ -432,9 +434,24 @@ export class PiPgmService {
     if (this.liveRestored) void this.flushLivePlaylists();
   }
 
+  /** A playlist entry for a library item: a copy with its own entry id, so the same item can be listed again. */
+  private newEntry(item: PiPgmItem): PiPgmItem {
+    return { ...structuredClone(item), entryId: `ent_${randomUUID().replaceAll("-", "").slice(0, 10)}` };
+  }
+
+  /** Puts an entry on air (or nothing, with null). */
+  private setActive(state: PipelineInternalState, entry: PiPgmItem | null | undefined): void {
+    state.activeItemId = entry?.id ?? null;
+    state.activeEntryId = entry?.entryId ?? null;
+  }
+
+  private activeEntry(state: PipelineInternalState): PiPgmItem | undefined {
+    return state.activeEntryId === null ? undefined : state.playlist.find((i) => i.entryId === state.activeEntryId);
+  }
+
   /** The playlist as stored: the item carried over from a loaded playlist is not part of it. */
   private liveIdsOf(state: PipelineInternalState): string[] {
-    return state.playlist.filter((i) => i.id !== state.carriedItemId).map((i) => i.id);
+    return state.playlist.filter((i) => i.entryId !== state.carriedItemId).map((i) => i.id);
   }
 
   private async flushLivePlaylists(): Promise<void> {
@@ -469,7 +486,7 @@ export class PiPgmService {
       if (!ids) continue;
       for (const itemId of ids) {
         const item = this.library.get(itemId);
-        if (item) state.playlist.push(structuredClone(item));
+        if (item) state.playlist.push(this.newEntry(item));
         else onSkip?.(`live/${id}`, `item ${itemId} is no longer in the library`);
       }
     }
@@ -554,10 +571,11 @@ export class PiPgmService {
     this.savedItems.delete(itemId);
     for (const state of this.pipelines.values()) {
       const before = state.playlist.length;
+      const carried = state.playlist.find((i) => i.entryId === state.carriedItemId);
       state.playlist = state.playlist.filter((i) => i.id !== itemId);
-      if (state.carriedItemId === itemId) state.carriedItemId = null;
+      if (carried?.id === itemId) state.carriedItemId = null;
       else if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
-      if (state.activeItemId === itemId) state.activeItemId = null;
+      if (state.activeItemId === itemId) this.setActive(state, null);
       if (state.basicImageItemId === itemId) state.basicImageItemId = null;
     }
     await this.libraryStore?.remove(itemId, assetIds);
@@ -572,6 +590,7 @@ export class PiPgmService {
     const item = this.library.get(itemId);
     const base = this.pipelines.get("PiPGM1");
     if (!item || !item.steps[step] || !base) return null;
+    const previewEntry = this.newEntry(item);
     return this.toSnapshot({
       id: base.id,
       label: base.label,
@@ -588,9 +607,10 @@ export class PiPgmService {
       volume: 0,
       linked: false,
       activeItemId: item.id,
+      activeEntryId: previewEntry.entryId ?? null,
       currentStep: step,
       playbackState: "playing",
-      playlist: [structuredClone(item)],
+      playlist: [previewEntry],
       carriedItemId: null,
       stream: { ...base.stream }
     });
@@ -1009,7 +1029,7 @@ export class PiPgmService {
         const before = state.playlist.length;
         state.playlist = state.playlist.filter((i) => i.id !== entry.itemId);
         if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
-        if (state.activeItemId === entry.itemId) state.activeItemId = null;
+        if (state.activeItemId === entry.itemId) this.setActive(state, null);
       }
     }
   }
@@ -1074,18 +1094,20 @@ export class PiPgmService {
     if (!state) return undefined;
 
     const advanceItemOnEnd = request.advanceItemOnEnd ?? false;
-    const activeIndex = state.playlist.findIndex((i) => i.id === state.activeItemId);
+    const activeIndex = state.playlist.findIndex((i) => i.entryId === state.activeEntryId);
     const activeItem = activeIndex >= 0 ? state.playlist[activeIndex] : undefined;
 
     switch (request.action) {
       case "gotoItem": {
         let targetItem: PiPgmItem | undefined;
-        if (request.itemId) {
+        if (request.entryId) {
+          targetItem = state.playlist.find((i) => i.entryId === request.entryId);
+        } else if (request.itemId) {
           targetItem = state.playlist.find((i) => i.id === request.itemId);
           if (!targetItem) {
             const libItem = this.library.get(request.itemId);
             if (libItem) {
-              targetItem = structuredClone(libItem);
+              targetItem = this.newEntry(libItem);
               state.playlist.push(targetItem);
               this.persistLivePlaylist(state.id);
             }
@@ -1095,7 +1117,7 @@ export class PiPgmService {
         }
 
         if (targetItem) {
-          state.activeItemId = targetItem.id;
+          this.setActive(state, targetItem);
           state.currentStep = Math.max(
             0,
             Math.min(request.stepIndex ?? 0, Math.max(0, targetItem.steps.length - 1))
@@ -1117,7 +1139,7 @@ export class PiPgmService {
       case "next": {
         if (!activeItem && state.playlist.length > 0) {
           const first = state.playlist[0]!;
-          state.activeItemId = first.id;
+          this.setActive(state, first);
           state.currentStep = 0;
           break;
         }
@@ -1126,7 +1148,7 @@ export class PiPgmService {
             state.currentStep += 1;
           } else if (advanceItemOnEnd && activeIndex + 1 < state.playlist.length) {
             const nextItem = state.playlist[activeIndex + 1]!;
-            state.activeItemId = nextItem.id;
+            this.setActive(state, nextItem);
             state.currentStep = 0;
             state.playbackState =
               nextItem.kind === "video" || nextItem.kind === "youtube" ? "playing" : "stopped";
@@ -1141,7 +1163,7 @@ export class PiPgmService {
             state.currentStep -= 1;
           } else if (advanceItemOnEnd && activeIndex > 0) {
             const prevItem = state.playlist[activeIndex - 1]!;
-            state.activeItemId = prevItem.id;
+            this.setActive(state, prevItem);
             state.currentStep = Math.max(0, prevItem.steps.length - 1);
           }
         }
@@ -1202,16 +1224,13 @@ export class PiPgmService {
     const item = this.library.get(itemId);
     if (!state || !item) return undefined;
 
-    const existingIdx = state.playlist.findIndex((i) => i.id === item.id);
-    if (existingIdx < 0) {
-      state.playlist.push(structuredClone(item));
-      this.persistLivePlaylist(state.id);
-    } else {
-      state.playlist[existingIdx] = structuredClone(item);
-    }
+    // Always a new entry: the same item may be in the playlist several times.
+    const entry = this.newEntry(item);
+    state.playlist.push(entry);
+    this.persistLivePlaylist(state.id);
 
-    if (cueImmediately || state.activeItemId === null) {
-      state.activeItemId = item.id;
+    if (cueImmediately || state.activeEntryId === null) {
+      this.setActive(state, entry);
       state.currentStep = 0;
       state.playbackState = item.kind === "video" || item.kind === "youtube" ? "playing" : "stopped";
     }
@@ -1249,10 +1268,10 @@ export class PiPgmService {
 
   /** Removes the item carried over from a loaded playlist once the feed has moved off it. */
   private dropCarriedItem(state: PipelineInternalState): void {
-    if (state.carriedItemId === null || state.activeItemId === state.carriedItemId) return;
+    if (state.carriedItemId === null || state.activeEntryId === state.carriedItemId) return;
     const carried = state.carriedItemId;
     state.carriedItemId = null;
-    state.playlist = state.playlist.filter((i) => i.id !== carried);
+    state.playlist = state.playlist.filter((i) => i.entryId !== carried);
   }
 
   /** The library item a saved entry stands for: by id, else the newest item of the same kind and title, else a hymn of that number. */
@@ -1296,7 +1315,6 @@ export class PiPgmService {
     const resolved: LoadReport["resolved"] = [];
     const missing: LoadReport["missing"] = [];
     const duplicates: LoadReport["duplicates"] = [];
-    const chosen = new Set<string>(mode === "append" ? state.playlist.map((i) => i.id) : []);
     const items: PiPgmItem[] = [];
     const skipped: LoadReport["skipped"] = [];
     entries.forEach((entry, index) => {
@@ -1315,12 +1333,7 @@ export class PiPgmService {
         });
         return;
       }
-      if (chosen.has(found.item.id)) {
-        duplicates.push({ index, itemId: found.item.id });
-        return;
-      }
-      chosen.add(found.item.id);
-      items.push(structuredClone(found.item));
+      items.push(this.newEntry(found.item));
       resolved.push({ index, itemId: found.item.id, by: found.by });
     });
     if (options.strict && missing.length > 0) return { error: "MISSING_ITEMS", missing };
@@ -1329,18 +1342,22 @@ export class PiPgmService {
     if (mode === "append") {
       state.playlist.push(...items);
     } else {
-      const active = state.activeItemId === null ? undefined : state.playlist.find((i) => i.id === state.activeItemId);
+      const active = this.activeEntry(state);
       state.playlist = items;
       state.carriedItemId = null;
       if (active) {
         keptActiveItemId = active.id;
-        if (!items.some((i) => i.id === active.id)) {
+        const same = items.find((i) => i.id === active.id);
+        if (same) {
+          // The new list holds the item that is on air: that entry takes over, the step stays.
+          this.setActive(state, same);
+        } else {
           state.playlist.unshift(active);
-          state.carriedItemId = active.id;
+          state.carriedItemId = active.entryId ?? null;
         }
       } else if (state.activeItemId !== null) {
         // The active item was not in the playlist (it was cued from the library): nothing to keep.
-        state.activeItemId = null;
+        this.setActive(state, null);
         state.currentStep = 0;
         state.playbackState = "stopped";
       }
@@ -1356,28 +1373,41 @@ export class PiPgmService {
   }
 
   /**
-   * Replaces or reorders the playlist in one step. `itemIds` becomes the whole playlist, in that order
-   * (items that were not in it are added, items left out are removed). Nothing changes when an id is
-   * unknown or repeated. The active item and its step stay when the item is still in the list; if it
-   * is not (or nothing was active), the first item becomes active, as when an item is added or removed.
+   * Replaces or reorders the playlist in one step. `ids` becomes the whole playlist, in that order. Each id is a
+   * library item id (a new entry is made, so an item can be listed several times) or the entry id of an entry
+   * already in the playlist (that entry is kept, which keeps what is on air). Entries left out are removed. Nothing
+   * changes when an id is unknown. The entry on air and its step stay when it is still in the list (or, when it
+   * was left out, an entry of the same item takes over); otherwise the first entry becomes active.
    */
   setPlaylistOrder(
     pipelineId: string,
-    itemIds: readonly string[]
-  ): PiPgmPipelineSnapshot | { error: "UNKNOWN_ITEMS" | "DUPLICATE_ITEMS"; ids: string[] } | undefined {
+    ids: readonly string[]
+  ): PiPgmPipelineSnapshot | { error: "UNKNOWN_ITEMS"; ids: string[] } | undefined {
     const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
     if (!state) return undefined;
-    const unknown = itemIds.filter((id) => !this.library.has(id));
+    const entries = new Map(state.playlist.filter((i) => i.entryId).map((i) => [i.entryId as string, i]));
+    const unknown = ids.filter((id) => !entries.has(id) && !this.library.has(id));
     if (unknown.length > 0) return { error: "UNKNOWN_ITEMS", ids: [...new Set(unknown)] };
-    const seen = new Set<string>();
-    const duplicates = itemIds.filter((id) => (seen.has(id) ? true : (seen.add(id), false)));
-    if (duplicates.length > 0) return { error: "DUPLICATE_ITEMS", ids: [...new Set(duplicates)] };
 
-    state.playlist = itemIds.map((id) => structuredClone(this.library.get(id)!));
+    const used = new Set<string>();
+    const next = ids.map((id) => {
+      const existing = entries.get(id);
+      if (existing && !used.has(id)) {
+        used.add(id);
+        return existing;
+      }
+      return this.newEntry(this.library.get(id) ?? existing!);
+    });
+    const previous = this.activeEntry(state);
+    state.playlist = next;
     state.carriedItemId = null;
     this.persistLivePlaylist(state.id);
-    if (state.activeItemId === null ? state.playlist.length > 0 : !seen.has(state.activeItemId)) {
-      state.activeItemId = state.playlist[0]?.id ?? null;
+    if (previous && next.includes(previous)) {
+      // still there, nothing to change
+    } else if (previous && next.some((i) => i.id === previous.id)) {
+      this.setActive(state, next.find((i) => i.id === previous.id));
+    } else if (state.activeEntryId === null ? next.length > 0 : true) {
+      this.setActive(state, next[0]);
       state.currentStep = 0;
       state.playbackState = "stopped";
     }
@@ -1387,16 +1417,19 @@ export class PiPgmService {
     return snapshot;
   }
 
-  removeItemFromPipeline(pipelineId: string, itemId: string): PiPgmPipelineSnapshot | undefined {
+  /** Removes one entry: `id` is an entry id, or an item id (then the first entry of that item). */
+  removeItemFromPipeline(pipelineId: string, id: string): PiPgmPipelineSnapshot | undefined {
     const state = this.pipelines.get(pipelineId as PiPgmPipelineId);
     if (!state) return undefined;
 
-    const before = state.playlist.length;
-    state.playlist = state.playlist.filter((i) => i.id !== itemId);
-    if (state.carriedItemId === itemId) state.carriedItemId = null;
-    else if (state.playlist.length !== before) this.persistLivePlaylist(state.id);
-    if (state.activeItemId === itemId) {
-      state.activeItemId = state.playlist[0]?.id ?? null;
+    const index = state.playlist.findIndex((i) => i.entryId === id);
+    const at = index >= 0 ? index : state.playlist.findIndex((i) => i.id === id);
+    const removed = at >= 0 ? state.playlist[at] : undefined;
+    if (removed) state.playlist.splice(at, 1);
+    if (removed && state.carriedItemId === removed.entryId) state.carriedItemId = null;
+    else if (removed) this.persistLivePlaylist(state.id);
+    if (removed && state.activeEntryId === removed.entryId) {
+      this.setActive(state, state.playlist[0]);
       state.currentStep = 0;
       state.playbackState = "stopped";
     }
@@ -1672,7 +1705,7 @@ export class PiPgmService {
     } else if (request.designId) {
       for (const [pId, state] of this.pipelines.entries()) {
         if (!state.activeItemId) continue;
-        const activeItem = state.playlist.find((i) => i.id === state.activeItemId) || this.library.get(state.activeItemId);
+        const activeItem = this.activeEntry(state) || this.library.get(state.activeItemId);
         if (activeItem && activeItem.kind === "canva" && activeItem.canva?.designId === request.designId) {
           targetIds.push(pId);
         }
@@ -1682,7 +1715,7 @@ export class PiPgmService {
     if (targetIds.length === 0) {
       for (const [pId, state] of this.pipelines.entries()) {
         if (!state.activeItemId) continue;
-        const activeItem = state.playlist.find((i) => i.id === state.activeItemId) || this.library.get(state.activeItemId);
+        const activeItem = this.activeEntry(state) || this.library.get(state.activeItemId);
         if (activeItem && activeItem.kind === "canva") {
           targetIds.push(pId);
         }
@@ -1743,7 +1776,7 @@ export class PiPgmService {
 
         case "mode": {
           if (request.mode && state.activeItemId) {
-            const activeItem = state.playlist.find((i) => i.id === state.activeItemId) || this.library.get(state.activeItemId);
+            const activeItem = this.activeEntry(state) || this.library.get(state.activeItemId);
             if (activeItem && activeItem.kind === "canva" && activeItem.canva) {
               activeItem.canva.mode = request.mode;
               activeItem.steps = buildCanvaSteps(activeItem.canva);
@@ -1923,11 +1956,13 @@ export class PiPgmService {
 
   private syncLibraryItemToPlaylists(updatedItem: PiPgmItem): void {
     for (const state of this.pipelines.values()) {
-      const idx = state.playlist.findIndex((i) => i.id === updatedItem.id);
-      if (idx >= 0) {
-        state.playlist[idx] = structuredClone(updatedItem);
-        this.emitPipelineEvent("item:updated", this.toSnapshot(state));
-      }
+      let changed = false;
+      state.playlist = state.playlist.map((entry) => {
+        if (entry.id !== updatedItem.id) return entry;
+        changed = true;
+        return { ...structuredClone(updatedItem), ...(entry.entryId ? { entryId: entry.entryId } : {}) };
+      });
+      if (changed) this.emitPipelineEvent("item:updated", this.toSnapshot(state));
     }
   }
 
@@ -1966,7 +2001,7 @@ export class PiPgmService {
 
   private toSnapshot(state: PipelineInternalState): PiPgmPipelineSnapshot {
     this.expireArming(state);
-    const activeIndex = state.playlist.findIndex((i) => i.id === state.activeItemId);
+    const activeIndex = state.playlist.findIndex((i) => i.entryId === state.activeEntryId);
     const activeItem = activeIndex >= 0 ? state.playlist[activeIndex] ?? null : null;
     const totalSteps = activeItem ? activeItem.steps.length : 0;
     const currentStepDetail =
@@ -2007,6 +2042,7 @@ export class PiPgmService {
         : null,
       linked: state.linked,
       activeItemId: state.activeItemId,
+      activeEntryId: state.activeEntryId,
       activeItemIndex: activeIndex,
       currentStep: state.currentStep,
       totalSteps,
