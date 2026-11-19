@@ -133,7 +133,7 @@ test("playlist/steps lists every step of the playlist in order and marks the act
   }
 });
 
-test("playlist/order reorders, replaces and refuses unknown or repeated ids without changing anything", async () => {
+test("playlist/order reorders, replaces and refuses unknown ids without changing anything, and allows repeats", async () => {
   const app = buildPipgmServer();
   try {
     const ids: string[] = [];
@@ -159,11 +159,22 @@ test("playlist/order reorders, replaces and refuses unknown or repeated ids with
     const unknown = await put([ids[1], "nope"]);
     assert.equal(unknown.statusCode, 422);
     assert.equal(unknown.json().error.code, "UNKNOWN_ITEMS");
-    const dup = await put([ids[1], ids[1]]);
-    assert.equal(dup.statusCode, 422);
-    assert.equal(dup.json().error.code, "DUPLICATE_ITEMS");
     assert.equal((await put("x")).statusCode, 422);
     assert.deepEqual(await titles(), ["C", "B"]);
+    // the same item may be listed twice; each copy is its own entry
+    const dup = await put([ids[1], ids[1], ids[2]]);
+    assert.equal(dup.statusCode, 200);
+    assert.deepEqual(await titles(), ["B", "B", "C"]);
+    const entryIds = (dup.json().playlist as Array<{ entryId: string }>).map((i) => i.entryId);
+    assert.notEqual(entryIds[0], entryIds[1]);
+    // entry ids reorder the existing entries
+    const swapped = await put([entryIds[2], entryIds[1], entryIds[0]]);
+    assert.deepEqual((swapped.json().playlist as Array<{ entryId: string }>).map((i) => i.entryId), [entryIds[2], entryIds[1], entryIds[0]]);
+    // removing by entry id drops just that copy
+    const removed = await app.inject({ method: "DELETE", url: `/api/v1/pipgm/pipelines/PiPGM1/playlist/${entryIds[1]}` });
+    assert.equal(removed.statusCode, 200);
+    assert.deepEqual(await titles(), ["C", "B"]);
+    await put([ids[1], ids[2]]);
 
     assert.equal((await put([])).json().activeItemId, null);
     assert.equal((await app.inject({ method: "PUT", url: "/api/v1/pipgm/pipelines/PiPGM9/playlist/order", payload: { itemIds: [] } })).statusCode, 404);
@@ -335,7 +346,7 @@ test("playlist/load reports missing items, matches by kind and title or hymn num
   }
 });
 
-test("playlist/load appends without duplicates, and refuses bad requests", async () => {
+test("playlist/load appends repeats too, and refuses bad requests", async () => {
   const app = buildPipgmServer();
   try {
     const feed = "/api/v1/pipgm/pipelines/PiPGM2";
@@ -344,8 +355,7 @@ test("playlist/load appends without duplicates, and refuses bad requests", async
     const saved = (await app.inject({ method: "POST", url: `${feed}/playlist/save`, payload: { name: "S" } })).json().id as string;
     await app.inject({ method: "DELETE", url: `${feed}/playlist/${b}` });
     const res = await app.inject({ method: "POST", url: `${feed}/playlist/load`, payload: { playlistId: saved, mode: "append" } });
-    assert.deepEqual(res.json().pipeline.playlist.map((i: { id: string }) => i.id), [a, b]);
-    assert.deepEqual(res.json().report.duplicates, [{ index: 0, itemId: a }]);
+    assert.deepEqual(res.json().pipeline.playlist.map((i: { id: string }) => i.id), [a, a, b]);
 
     const load = (payload: object) => app.inject({ method: "POST", url: `${feed}/playlist/load`, payload });
     assert.equal((await load({})).json().error.code, "PLAYLIST_ID_REQUIRED");

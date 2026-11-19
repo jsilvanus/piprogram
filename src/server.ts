@@ -502,6 +502,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       action?: unknown;
       stepIndex?: unknown;
       itemId?: unknown;
+      entryId?: unknown;
       itemIndex?: unknown;
       advanceItemOnEnd?: unknown;
       sync?: unknown;
@@ -525,6 +526,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       action,
       ...(stepIndex !== undefined ? { stepIndex } : {}),
       ...(typeof body.itemId === "string" ? { itemId: body.itemId } : {}),
+      ...(typeof body.entryId === "string" ? { entryId: body.entryId } : {}),
       ...(itemIndex !== undefined ? { itemIndex } : {}),
       ...(typeof body.advanceItemOnEnd === "boolean" ? { advanceItemOnEnd: body.advanceItemOnEnd } : {}),
       ...(typeof body.sync === "boolean" ? { sync: body.sync } : {})
@@ -704,11 +706,8 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       if ("error" in result) {
         return reply.code(422).send({
           error: {
-            code: result.error === "UNKNOWN_ITEMS" ? "UNKNOWN_ITEMS" : "DUPLICATE_ITEMS",
-            message:
-              result.error === "UNKNOWN_ITEMS"
-                ? `Not in the library: ${result.ids.join(", ")}`
-                : `Listed more than once: ${result.ids.join(", ")}`,
+            code: "UNKNOWN_ITEMS",
+            message: `Not in the library: ${result.ids.join(", ")}`,
             ids: result.ids
           }
         });
@@ -725,6 +724,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       if (!pipeline) return notFound(reply, request.params.pipelineId);
       const out: Array<{
         itemId: string;
+        entryId: string | null;
         itemIndex: number;
         itemTitle: string;
         itemKind: string;
@@ -745,6 +745,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         for (const [stepIndex, step] of item.steps.entries()) {
           out.push({
             itemId: item.id,
+            entryId: item.entryId ?? null,
             itemIndex,
             itemTitle: item.title,
             itemKind: item.kind,
@@ -753,7 +754,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
             thumbnailUrl: prepared.get(stepIndex)
               ? `${base}/${stepIndex}/thumbnail.jpg?orientation=${pipeline.orientation}`
               : null,
-            isActive: pipeline.activeItemId === item.id && pipeline.currentStep === stepIndex
+            isActive: (item.entryId ? pipeline.activeEntryId === item.entryId : pipeline.activeItemId === item.id) && pipeline.currentStep === stepIndex
           });
         }
       }
@@ -761,6 +762,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         pipelineId: pipeline.id,
         orientation: pipeline.orientation,
         activeItemId: pipeline.activeItemId,
+        activeEntryId: pipeline.activeEntryId,
         currentStep: pipeline.currentStep,
         steps: out
       });
