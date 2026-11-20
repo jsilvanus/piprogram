@@ -2,6 +2,7 @@ import { DEFAULT_TIMEZONE, parseUseAt, UseAtError, useAtIntervals } from "./use-
 import { PiSwitchClient, type SlideAdvanceResult } from "./piswitch-client.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import type { PipgmFrameRenderer } from "./frame.js";
+import type { StepImages } from "./step-cache.js";
 import type { ManagedStreamSnapshot, PiMatrixEventBroker } from "./types/external.js";
 import {
   buildCanvaSteps,
@@ -37,7 +38,7 @@ import {
 import { createTtsEngineFromEnv, readWavInfo, VOICE_NAME, type TtsEngine } from "./tts.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assetsOfEntry, LibraryPersistence } from "./library-store.js";
 import type { SavedPlaylistItem } from "./playlist-store.js";
@@ -193,6 +194,8 @@ export interface PiPgmServiceOptions {
    * Call loadLibrary() once at start to read what was stored.
    */
   libraryStore?: LibraryPersistence | undefined;
+  /** Pre-rendered step image cache (pistorage). */
+  stepImages?: StepImages | undefined;
 }
 
 export type PrepareSpeechErrorCode =
@@ -256,6 +259,7 @@ export class PiPgmService {
   private readonly piswitchClient?: PiSwitchClient | undefined;
   private readonly autoSyncPiswitch: boolean;
   private readonly frameRenderer?: PipgmFrameRenderer | undefined;
+  private stepImages?: StepImages | undefined;
   private readonly ttsEngine: TtsEngine | undefined;
   readonly ttsMaxChars: number;
   readonly ttsMaxSeconds: number;
@@ -286,6 +290,7 @@ export class PiPgmService {
     this.canvaRetentionDays = Math.max(0, options.canvaRetentionDays ?? numberFromEnv("PIPGM_CANVA_RETENTION_DAYS") ?? 60);
     this.canvaConfig = options.canvaConfig ?? {};
     this.frameRenderer = options.frameRenderer;
+    this.stepImages = options.stepImages;
     this.now = options.now ?? Date.now;
     this.ttsEngine = "ttsEngine" in options ? options.ttsEngine : createTtsEngineFromEnv();
     this.ttsMaxChars = Math.round(options.ttsMaxChars ?? positiveFromEnv("PIPGM_TTS_MAX_CHARS", 500));
@@ -528,6 +533,20 @@ export class PiPgmService {
   /** The bytes of an asset kept in the store (null: not there). */
   async readStoredAsset(assetId: string): Promise<Buffer | null> {
     return this.libraryStore ? this.libraryStore.readAsset(assetId) : null;
+  }
+
+  /** Reads an asset's bytes whether held in memory, on disk, or in pistorage. */
+  async readAssetBytes(assetId: string): Promise<Buffer | null> {
+    const asset = this.assets.get(assetId);
+    if (!asset) return null;
+    if (asset.data) return asset.data;
+    if (asset.stored) return this.readStoredAsset(asset.id);
+    if (asset.filePath) return readFile(asset.filePath);
+    return null;
+  }
+
+  setStepImages(steps: StepImages): void {
+    this.stepImages = steps;
   }
 
   /** Removes a library item, its uploaded bytes and its place in every playlist. False when unknown. */
@@ -2070,18 +2089,31 @@ export class PiPgmService {
     try {
       const advanceResult = await this.piswitchClient.advanceSlide();
 
-      if (this.frameRenderer) {
+      let png: Buffer | null = null;
+      if (this.stepImages && pipeline.activeItemId && !pipeline.fadeToBlack) {
+        png =
+          (await this.stepImages.lookupVariant(pipeline, "rgba-left")) ??
+          (await this.stepImages.lookupVariant(pipeline, "rgba-right")) ??
+          (await this.stepImages.lookup(pipeline));
+      }
+      if (!png && this.frameRenderer) {
         try {
-          const png = await this.frameRenderer({
+          png = await this.frameRenderer({
             html: renderPiPgmStageHtml(pipeline, { transparent: true, silent: true }),
             width: pipeline.resolution.width,
             height: pipeline.resolution.height,
             transparent: true
           });
+        } catch {
+          // frame rendering failed
+        }
+      }
+      if (png) {
+        try {
           const slideName = `pipgm-${pipeline.id}-step${pipeline.currentStep}`;
           await this.piswitchClient.uploadStill(advanceResult.activeSlot, png, slideName, "slides");
         } catch {
-          // frame rendering or upload failed, but buffer advanced
+          // upload failed, but buffer advanced
         }
       }
 

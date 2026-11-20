@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { MemoryBlobStore } from "./library-store.js";
 import { PiPgmService } from "./pipgm-service.js";
 import { PiSwitchClient, type SlideAdvanceResult } from "./piswitch-client.js";
 import { buildPipgmServer } from "./server.js";
+import { itemVersion, StepImages } from "./step-cache.js";
 
 const PNG_1X1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
 
@@ -142,4 +144,61 @@ test("server route /api/v1/pipgm/pipelines/:id/sync-piswitch returns 200 with re
   assert.equal(data.synced, true);
   assert.equal(data.slideBuffer.activeSlot, 1);
   assert.equal(data.slideBuffer.cleanedSlot, 5);
+});
+
+test("PiPgmService: syncToPiSwitch uses pre-rendered rgba-left variant from StepImages without calling frameRenderer", async () => {
+  const uploaded: Array<{ slot: number; body: Buffer }> = [];
+  const mockClient = new PiSwitchClient({
+    fetchFn: async (input, init) => {
+      const url = input.toString();
+      if (url.includes("/slides/advance")) {
+        return new Response(
+          JSON.stringify({ activeSlot: 4, cleanedSlot: null, lookaheadSlots: [5, 6, 1, 2, 3], mediaPlayer: 1 }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.includes("/slots/")) {
+        const match = url.match(/\/slots\/(\d+)/);
+        uploaded.push({ slot: Number(match?.[1] ?? 0), body: Buffer.from(init?.body as Uint8Array) });
+        return new Response(JSON.stringify({ slot: 4, pool: "slides", bytes: 10 }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }
+  });
+
+  const store = new MemoryBlobStore();
+  let frameRendererCalls = 0;
+  const service = new PiPgmService({
+    piswitchClient: mockClient,
+    autoSyncPiswitch: false,
+    frameRenderer: async () => {
+      frameRendererCalls += 1;
+      return PNG_1X1;
+    }
+  });
+  const steps = new StepImages({
+    store,
+    renderFrame: async () => PNG_1X1,
+    snapshotForStep: (id, step, o) => service.snapshotForStep(id, step, o),
+    getItem: (id) => service.getLibraryItem(id)
+  });
+  service.setStepImages(steps);
+
+  const hymn = service.createHymnItem({
+    title: "Pre-rendered Hymn",
+    stanzas: [{ lines: ["Line 1"] }],
+    targetPipelineId: "PiPGM1",
+    cueImmediately: true
+  });
+
+  const cachedRgba = Buffer.from("cached-rgba-left-png");
+  const ver = itemVersion(hymn, "rgba-left");
+  await store.put(`piprogram/steps/${hymn.id}/${ver}/rgba-left/0.png`, cachedRgba, { contentType: "image/png" });
+
+  const result = await service.syncToPiSwitch("PiPGM1");
+  assert.ok(result);
+  assert.equal(frameRendererCalls, 0, "frameRenderer was not called when rgba-left is cached");
+  assert.equal(uploaded.length, 1);
+  assert.equal(uploaded[0]!.slot, 4);
+  assert.deepEqual(uploaded[0]!.body, cachedRgba);
 });

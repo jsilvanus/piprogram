@@ -63,6 +63,21 @@ test("feederArgs reads PNG frames from stdin and publishes over RTSP", () => {
   assert.ok(args.includes("-an"), "a feed carries no audio");
   assert.equal(args.at(-1), "rtsp://127.0.0.1:8554/PiPGM1");
   assert.ok(feederArgs("rtsp://x/y", 5, "h264_v4l2m2m").includes("h264_v4l2m2m"));
+  const lowInput = feederArgs("rtsp://x/y", 5, "libx264", 1);
+  assert.ok(lowInput.join(" ").includes("-f image2pipe -framerate 1 -c:v png -i -"));
+  assert.ok(lowInput.join(" ").includes("-r 5 -g 5"));
+});
+
+test("StillFeeder defaults inputFps to 1 and writes a new frame immediately", () => {
+  const { procs, calls, spawn } = fakeSpawn();
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 5, spawn });
+  feeder.show(Buffer.from("first"), 1920, 1080);
+  assert.equal(calls[0]?.[calls[0].indexOf("-framerate") + 1], "1");
+  assert.equal(calls[0]?.[calls[0].indexOf("-r") + 1], "5");
+  assert.equal(procs[0]?.writes.length, 1);
+  feeder.show(Buffer.from("second"), 1920, 1080);
+  assert.equal(procs[0]?.writes.length, 2);
+  feeder.stop();
 });
 
 test("a new picture is swapped in without restarting ffmpeg", async () => {

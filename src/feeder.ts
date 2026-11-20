@@ -65,7 +65,7 @@ export function solidPng(width: number, height: number, rgb: [number, number, nu
 }
 
 /** The ffmpeg command line of one feed: PNG frames on stdin, H.264 over RTSP. Pure. */
-export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder): string[] {
+export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder, inputFps = fps): string[] {
   const encoderArgs =
     encoder === "h264_v4l2m2m"
       ? ["-c:v", "h264_v4l2m2m", "-b:v", "2M"]
@@ -75,7 +75,7 @@ export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder)
     "-nostdin",
     "-loglevel", "warning",
     "-f", "image2pipe",
-    "-framerate", String(fps),
+    "-framerate", String(inputFps),
     "-c:v", "png",
     "-i", "-",
     "-an",
@@ -94,6 +94,8 @@ export interface StillFeederOptions {
   ffmpeg?: string | undefined;
   encoder?: FeederEncoder | undefined;
   fps?: number | undefined;
+  /** Input pipe framerate (PNG decodes/sec). Default 1 so ffmpeg duplicates frames to `fps`. */
+  inputFps?: number | undefined;
   /** First restart delay, doubled up to maxRestartMs. Default 1000 ms. */
   restartBaseMs?: number | undefined;
   maxRestartMs?: number | undefined;
@@ -123,10 +125,12 @@ export class StillFeeder {
   private failuresInARow = 0;
   private lastError: string | null = null;
   private readonly fps: number;
+  private readonly inputFps: number;
   private readonly spawn: SpawnFeeder;
 
   constructor(private readonly options: StillFeederOptions) {
     this.fps = options.fps ?? 5;
+    this.inputFps = options.inputFps ?? Math.min(this.fps, 1);
     this.spawn =
       options.spawn ??
       ((command, args) => {
@@ -153,14 +157,17 @@ export class StillFeeder {
   /** Show this picture from now on. A new size restarts ffmpeg (one process cannot change size). */
   show(png: Buffer, width: number, height: number): void {
     const sizeChanged = this.width !== null && (this.width !== width || this.height !== height);
+    const frameChanged = this.frame !== png;
     this.frame = png;
     this.width = width;
     this.height = height;
     this.stopped = false;
     if (sizeChanged && this.process) this.killProcess();
-    if (!this.process && !this.restartTimer) this.launch();
+    const shouldLaunch = !this.process && !this.restartTimer;
+    if (shouldLaunch) this.launch();
+    else if (frameChanged && this.process) this.tick();
     if (!this.timer) {
-      this.timer = setInterval(() => this.tick(), Math.round(1000 / this.fps));
+      this.timer = setInterval(() => this.tick(), Math.round(1000 / this.inputFps));
       this.timer.unref();
     }
   }
@@ -192,7 +199,7 @@ export class StillFeeder {
   private launch(): void {
     const proc = this.spawn(
       this.options.ffmpeg ?? "ffmpeg",
-      feederArgs(this.options.rtspUrl, this.fps, this.options.encoder ?? "libx264")
+      feederArgs(this.options.rtspUrl, this.fps, this.options.encoder ?? "libx264", this.inputFps)
     );
     this.process = proc;
     this.draining = false;
@@ -209,6 +216,7 @@ export class StillFeeder {
     proc.onError((error) => ended(error.message));
     proc.stdin?.once("drain", () => undefined);
     (proc.stdin as unknown as { on?(event: "error", listener: () => void): void } | null)?.on?.("error", () => undefined);
+    if (this.frame) this.tick();
   }
 
   private fail(reason: string): void {

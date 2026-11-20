@@ -22,7 +22,7 @@ import type {
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmFrameRenderer } from "./frame.js";
 import { CanvaPackages, imageTypeOf, numberPages } from "./canva-package.js";
-import { StepImages, ffmpegThumbnailer, type Thumbnailer } from "./step-cache.js";
+import { StepImages, ffmpegRenderCustomVariant, ffmpegThumbnailer, isSupportedImageBuffer, variantResolution, type StepVariant, type Thumbnailer, type VariantRenderOptions } from "./step-cache.js";
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
 import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
@@ -61,14 +61,57 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
 const FRAME_MIN_SIDE = 16;
 const FRAME_MAX_SIDE = 3840;
 
-type FrameQuery = { width?: string; height?: string; alpha?: string };
+type FrameQuery = {
+  width?: string;
+  height?: string;
+  alpha?: string;
+  variant?: string;
+  side?: string;
+  keyMode?: string;
+  keyColor?: string;
+  slideAspect?: string;
+  slideScale?: string;
+  offsetX?: string;
+  offsetY?: string;
+};
 
-/** Frame size and alpha from the query string; the pipeline's own resolution is the default. */
+const VALID_VARIANTS = new Set<StepVariant>([
+  "landscape",
+  "portrait",
+  "9:16",
+  "10:16",
+  "chroma-left",
+  "chroma-right",
+  "rgba-left",
+  "rgba-right"
+]);
+
+/** Frame size, alpha, and optional composite/variant parameters from the query string. */
 function parseFrameQuery(
   query: FrameQuery,
   resolution: { width: number; height: number }
-): { ok: true; width: number; height: number; alpha: boolean } | { ok: false; message: string } {
-  const side = (value: string | undefined, fallback: number, name: string) => {
+): { ok: true; width: number; height: number; alpha: boolean; variantOptions: VariantRenderOptions | null } | { ok: false; message: string } {
+  const variant = query.variant as StepVariant | undefined;
+  if (variant !== undefined && !VALID_VARIANTS.has(variant)) {
+    return { ok: false, message: "variant must be one of landscape, portrait, 9:16, 10:16, chroma-left, chroma-right, rgba-left, rgba-right" };
+  }
+  const hasCompositeParam =
+    variant !== undefined ||
+    query.side !== undefined ||
+    query.keyMode !== undefined ||
+    query.keyColor !== undefined ||
+    query.slideAspect !== undefined ||
+    query.slideScale !== undefined ||
+    query.offsetX !== undefined ||
+    query.offsetY !== undefined;
+
+  const defaultRes = variant
+    ? variantResolution(variant)
+    : hasCompositeParam
+      ? { width: 1920, height: 1080 }
+      : resolution;
+
+  const sideVal = (value: string | undefined, fallback: number, name: string) => {
     if (value === undefined) return { ok: true as const, value: fallback };
     const parsed = /^\d+$/.test(value) ? Number(value) : NaN;
     if (!Number.isInteger(parsed) || parsed < FRAME_MIN_SIDE || parsed > FRAME_MAX_SIDE) {
@@ -76,18 +119,74 @@ function parseFrameQuery(
     }
     return { ok: true as const, value: parsed };
   };
-  const width = side(query.width, resolution.width, "width");
+  const width = sideVal(query.width, defaultRes.width, "width");
   if (!width.ok) return { ok: false, message: width.message };
-  const height = side(query.height, resolution.height, "height");
+  const height = sideVal(query.height, defaultRes.height, "height");
   if (!height.ok) return { ok: false, message: height.message };
   if (query.alpha !== undefined && !["1", "0", "true", "false"].includes(query.alpha)) {
     return { ok: false, message: "alpha must be 1, 0, true or false" };
   }
+
+  let side: "left" | "right" | undefined;
+  if (query.side !== undefined) {
+    if (query.side !== "left" && query.side !== "right") return { ok: false, message: "side must be left or right" };
+    side = query.side;
+  }
+  let keyMode: "chroma" | "luma" | "rgba" | undefined;
+  if (query.keyMode !== undefined) {
+    if (query.keyMode !== "chroma" && query.keyMode !== "luma" && query.keyMode !== "rgba") {
+      return { ok: false, message: "keyMode must be chroma, luma or rgba" };
+    }
+    keyMode = query.keyMode;
+  }
+  let keyColor: string | undefined;
+  if (query.keyColor !== undefined) {
+    if (!/^#[0-9a-fA-F]{6}$/.test(query.keyColor)) return { ok: false, message: "keyColor must be #rrggbb" };
+    keyColor = query.keyColor.toLowerCase();
+  }
+  let slideAspect: "9:16" | "10:16" | undefined;
+  if (query.slideAspect !== undefined) {
+    if (query.slideAspect !== "9:16" && query.slideAspect !== "10:16") return { ok: false, message: "slideAspect must be 9:16 or 10:16" };
+    slideAspect = query.slideAspect;
+  }
+  const parseNum = (raw: string | undefined, min: number, max: number, name: string) => {
+    if (raw === undefined) return { ok: true as const, value: undefined };
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < min || n > max) {
+      return { ok: false as const, message: `${name} must be a number from ${min} to ${max}` };
+    }
+    return { ok: true as const, value: n };
+  };
+  const slideScale = parseNum(query.slideScale, 0.6, 1, "slideScale");
+  if (!slideScale.ok) return { ok: false, message: slideScale.message };
+  const offsetX = parseNum(query.offsetX, -1, 1, "offsetX");
+  if (!offsetX.ok) return { ok: false, message: offsetX.message };
+  const offsetY = parseNum(query.offsetY, -1, 1, "offsetY");
+  if (!offsetY.ok) return { ok: false, message: offsetY.message };
+
+  const alpha = query.alpha === "1" || query.alpha === "true" || keyMode === "rgba" || variant === "rgba-left" || variant === "rgba-right";
+
+  const variantOptions: VariantRenderOptions | null = hasCompositeParam
+    ? {
+        ...(variant !== undefined ? { variant } : {}),
+        width: width.value,
+        height: height.value,
+        ...(side !== undefined ? { side } : {}),
+        ...(keyMode !== undefined ? { keyMode } : {}),
+        ...(keyColor !== undefined ? { keyColor } : {}),
+        ...(slideAspect !== undefined ? { slideAspect } : {}),
+        ...(slideScale.value !== undefined ? { slideScale: slideScale.value } : {}),
+        ...(offsetX.value !== undefined ? { offsetX: offsetX.value } : {}),
+        ...(offsetY.value !== undefined ? { offsetY: offsetY.value } : {})
+      }
+    : null;
+
   return {
     ok: true,
     width: width.value,
     height: height.value,
-    alpha: query.alpha === "1" || query.alpha === "true"
+    alpha,
+    variantOptions
   };
 }
 
@@ -151,8 +250,11 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     renderFrame,
     snapshotForStep: (itemId, step, orientation) => service.snapshotForStep(itemId, step, orientation),
     getItem: (itemId) => service.getLibraryItem(itemId),
+    getAssetBytes: (assetId) => service.readAssetBytes(assetId),
+    ffmpeg: options.publish?.ffmpeg,
     thumbnailer: options.thumbnailer ?? ffmpegThumbnailer(options.publish?.ffmpeg)
   });
+  service.setStepImages(steps);
 
   const playlists = new PlaylistStore(options.playlistStore ?? new MemoryBlobStore());
   const storageDown = (reply: FastifyReply, error: unknown) =>
@@ -399,6 +501,44 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       const frame = parseFrameQuery(request.query ?? {}, pipeline.resolution);
       if (!frame.ok) return invalid(reply, "INVALID_FRAME_SIZE", frame.message);
       try {
+        if (pipeline.activeItemId && !pipeline.fadeToBlack) {
+          if (frame.variantOptions) {
+            const cached =
+              (await steps.lookupVariant(pipeline, frame.variantOptions)) ??
+              (await steps.renderCustomVariant(pipeline.activeItemId, pipeline.currentStep, frame.variantOptions));
+            if (cached) {
+              return reply
+                .type("image/png")
+                .header("cache-control", "no-cache")
+                .header("x-piprogram-composited", "1")
+                .send(cached);
+            }
+            const slidePng = await renderFrame({
+              html: renderPiPgmStageHtml(pipeline, { transparent: true, silent: true }),
+              width: pipeline.resolution.width,
+              height: pipeline.resolution.height,
+              transparent: true
+            });
+            if (isSupportedImageBuffer(slidePng)) {
+              try {
+                const composited = await ffmpegRenderCustomVariant(slidePng, frame.variantOptions);
+                return reply
+                  .type("image/png")
+                  .header("cache-control", "no-cache")
+                  .header("x-piprogram-composited", "1")
+                  .send(composited);
+              } catch {
+                // Fall back to the transparent native-aspect slide for the caller to composite.
+              }
+            }
+            return reply.type("image/png").header("cache-control", "no-cache").send(slidePng);
+          } else if (!frame.alpha) {
+            const cached = await steps.lookupVariant(pipeline, { width: frame.width, height: frame.height });
+            if (cached) {
+              return reply.type("image/png").header("cache-control", "no-cache").send(cached);
+            }
+          }
+        }
         const png = await renderFrame({
           html: renderPiPgmStageHtml(pipeline, { transparent: frame.alpha, silent: true }),
           width: frame.width,
