@@ -9,7 +9,7 @@
 
 import { UseAtError } from "./use-at.js";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { MAX_AUDIO_ARM_SECONDS, PiPgmService, type PiPgmServiceOptions } from "./pipgm-service.js";
 import type {
@@ -25,7 +25,7 @@ import { CanvaPackages, imageTypeOf, numberPages } from "./canva-package.js";
 import { StepImages, ffmpegThumbnailer, type Thumbnailer } from "./step-cache.js";
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
-import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
+import { decodeToPcm, PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** How often an unloaded library or unsaved items are retried against the store (default 60 s). */
@@ -55,7 +55,7 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
    * Publish the three feeds (PiPGM1-3) to MediaMTX from this process. Undefined = off.
    * Starts when the server is ready and stops when it closes.
    */
-  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder; fps?: number; spawn?: SpawnFeeder };
+  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder; fps?: number; audio?: boolean; spawn?: SpawnFeeder };
 }
 
 const FRAME_MIN_SIDE = 16;
@@ -172,6 +172,15 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         ffmpeg: options.publish.ffmpeg,
         encoder: options.publish.encoder,
         fps: options.publish.fps,
+        ...(options.publish.audio !== undefined ? { audio: options.publish.audio } : {}),
+        // The samples of the audio item that is playing on a feed, read from memory, the cache or the store.
+        audioPcm: async (snapshot) => {
+          const assetId = service.getLibraryItem(snapshot.audioTrack?.itemId ?? "")?.audio?.assetId;
+          const asset = assetId ? service.getAsset(assetId) : undefined;
+          if (!asset) return null;
+          const bytes = asset.data ?? (asset.filePath ? await readFile(asset.filePath) : await service.readStoredAsset(asset.id));
+          return bytes ? decodeToPcm(options.publish?.ffmpeg ?? "ffmpeg", bytes) : null;
+        },
         spawn: options.publish.spawn,
         steps,
         onError: (pipelineId, message) => app.log.warn({ pipelineId, err: message }, "feed publisher")

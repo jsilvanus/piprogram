@@ -46,7 +46,9 @@ async function main(): Promise<void> {
             rtspBase,
             ...(process.env.PIPGM_FFMPEG?.trim() ? { ffmpeg: process.env.PIPGM_FFMPEG.trim() } : {}),
             ...(encoder ? { encoder: encoder as FeederEncoder } : {}),
-            ...(fps ? { fps } : {})
+            ...(fps ? { fps } : {}),
+            // Every feed carries an audio track (silence unless a clip plays); 0 or false turns it off.
+            audio: !["0", "false", "off"].includes(process.env.PIPGM_PUBLISH_AUDIO?.trim().toLowerCase() ?? "")
           }
         }
       : {})

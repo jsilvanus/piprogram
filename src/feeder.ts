@@ -8,9 +8,12 @@
  * the stream never drops and the HDMI player on the other side never sees a gap (the old
  * route restarted ffmpeg per slide, which left about a second of black).
  *
- * Only the picture travels here. The stream has no audio track: sound on a feed is a
- * separate concern (see README). The feed is never taken down by a fade to black or an
- * empty pipeline; it publishes a black frame instead, so a route to it stays valid.
+ * Every feed also carries an audio track (PIPGM_PUBLISH_AUDIO, default on): raw 48 kHz stereo
+ * PCM written to ffmpeg's fd 3 in real time. It is silence, except while the feed's audio is
+ * armed and a clip is playing; then the clip's samples are written instead. The track is always
+ * there so a clip can start without restarting ffmpeg (a restart is a second of black). The
+ * feed is never taken down by a fade to black or an empty pipeline; it publishes a black frame
+ * instead, so a route to it stays valid.
  *
  * Disabled unless PIPGM_PUBLISH_RTSP_BASE is set. Not verified on the real Pi.
  */
@@ -25,6 +28,8 @@ import { renderPiPgmStageHtml } from "./stage-html.js";
 export type FeederEncoder = "libx264" | "h264_v4l2m2m";
 
 export interface FeederProcess {
+  /** ffmpeg's fd 3: raw s16le 48 kHz stereo audio. Absent when the process was started without audio. */
+  audio?: { write(chunk: Buffer): boolean; once(event: "drain", listener: () => void): unknown } | null;
   stdin: { write(chunk: Buffer): boolean; once(event: "drain", listener: () => void): unknown; end(): void } | null;
   kill(signal?: NodeJS.Signals): boolean;
   onExit(listener: (code: number | null) => void): void;
@@ -64,8 +69,12 @@ export function solidPng(width: number, height: number, rgb: [number, number, nu
   ]);
 }
 
-/** The ffmpeg command line of one feed: PNG frames on stdin, H.264 over RTSP. Pure. */
-export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder): string[] {
+export const AUDIO_RATE = 48000;
+/** Bytes of audio per millisecond: 48 kHz, 2 channels, 16 bit. */
+const AUDIO_BYTES_PER_MS = (AUDIO_RATE * 4) / 1000;
+
+/** The ffmpeg command line of one feed: PNG frames on stdin, H.264 over RTSP, audio from fd 3 when `audio`. Pure. */
+export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder, audio = false): string[] {
   const encoderArgs =
     encoder === "h264_v4l2m2m"
       ? ["-c:v", "h264_v4l2m2m", "-b:v", "2M"]
@@ -78,7 +87,9 @@ export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder)
     "-framerate", String(fps),
     "-c:v", "png",
     "-i", "-",
-    "-an",
+    ...(audio
+      ? ["-f", "s16le", "-ar", String(AUDIO_RATE), "-ac", "2", "-i", "pipe:3", "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "64k"]
+      : ["-an"]),
     "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
     ...encoderArgs,
     "-r", String(fps),
@@ -94,6 +105,8 @@ export interface StillFeederOptions {
   ffmpeg?: string | undefined;
   encoder?: FeederEncoder | undefined;
   fps?: number | undefined;
+  /** Publish an audio track (silence unless a clip plays). Default false here, true for PipgmFeeders. */
+  audio?: boolean | undefined;
   /** First restart delay, doubled up to maxRestartMs. Default 1000 ms. */
   restartBaseMs?: number | undefined;
   maxRestartMs?: number | undefined;
@@ -124,15 +137,25 @@ export class StillFeeder {
   private lastError: string | null = null;
   private readonly fps: number;
   private readonly spawn: SpawnFeeder;
+  private audioTimer: ReturnType<typeof setInterval> | null = null;
+  private audioStartedAt = 0;
+  private audioSent = 0;
+  private audioDraining = false;
+  private clip: Buffer | null = null;
+  private clipPos = 0;
+  private clipLoop = false;
+  private gain = 1;
 
   constructor(private readonly options: StillFeederOptions) {
     this.fps = options.fps ?? 5;
     this.spawn =
       options.spawn ??
       ((command, args) => {
-        const child = nodeSpawn(command, [...args], { stdio: ["pipe", "ignore", "ignore"] });
+        const child = nodeSpawn(command, [...args], { stdio: ["pipe", "ignore", "ignore", "pipe"] });
+        child.stdio[3]?.on("error", () => undefined);
         return {
           stdin: child.stdin,
+          audio: (child.stdio[3] as unknown as FeederProcess["audio"]) ?? null,
           kill: (signal) => child.kill(signal),
           onExit: (listener) => void child.once("exit", listener),
           onError: (listener) => void child.once("error", listener)
@@ -163,12 +186,96 @@ export class StillFeeder {
       this.timer = setInterval(() => this.tick(), Math.round(1000 / this.fps));
       this.timer.unref();
     }
+    if (this.options.audio && !this.audioTimer) {
+      this.audioTimer = setInterval(() => this.pumpAudio(), 20);
+      this.audioTimer.unref();
+    }
+  }
+
+  /** Play 48 kHz stereo s16le samples on the audio track from now on, replacing any clip that is playing. */
+  playClip(pcm: Buffer, loop = false): void {
+    this.clip = pcm.length >= 4 ? pcm : null;
+    this.clipPos = 0;
+    this.clipLoop = loop;
+  }
+
+  /** Back to silence. */
+  stopClip(): void {
+    this.clip = null;
+    this.clipPos = 0;
+  }
+
+  /** 0 to 1, applied to the clip's samples. */
+  setGain(gain: number): void {
+    this.gain = Math.max(0, Math.min(1, gain));
+  }
+
+  isPlayingClip(): boolean {
+    return this.clip !== null;
+  }
+
+  /** Writes the audio that is due by the wall clock, so the track keeps real time whatever the timer does. */
+  private pumpAudio(): void {
+    const sink = this.process?.audio;
+    if (!sink) return;
+    const due = Math.floor(((Date.now() - this.audioStartedAt) * AUDIO_BYTES_PER_MS) / 4) * 4;
+    if (this.audioDraining) {
+      this.audioSent = due; // a backed-up pipe drops audio instead of building a burst
+      return;
+    }
+    while (this.audioSent < due) {
+      const size = Math.min(due - this.audioSent, 7680);
+      const chunk = this.nextAudio(size);
+      this.audioSent += size;
+      try {
+        if (!sink.write(chunk)) {
+          this.audioDraining = true;
+          sink.once("drain", () => {
+            this.audioDraining = false;
+          });
+          return;
+        }
+      } catch (error) {
+        this.fail(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+  }
+
+  /** `size` bytes of audio: the clip (with gain) while there is one, silence otherwise. */
+  private nextAudio(size: number): Buffer {
+    const out = Buffer.alloc(size);
+    let at = 0;
+    while (this.clip && at < size) {
+      if (this.clipPos >= this.clip.length) {
+        if (!this.clipLoop) {
+          this.clip = null;
+          break;
+        }
+        this.clipPos = 0;
+      }
+      const n = Math.min(size - at, this.clip.length - this.clipPos) & ~3;
+      if (n <= 0) {
+        this.clip = null;
+        break;
+      }
+      for (let i = 0; i < n; i += 2) {
+        const sample = Math.round(this.clip.readInt16LE(this.clipPos + i) * this.gain);
+        out.writeInt16LE(Math.max(-32768, Math.min(32767, sample)), at + i);
+      }
+      this.clipPos += n;
+      at += n;
+    }
+    return out;
   }
 
   stop(): void {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.audioTimer) clearInterval(this.audioTimer);
+    this.audioTimer = null;
+    this.clip = null;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
     this.killProcess();
@@ -192,10 +299,13 @@ export class StillFeeder {
   private launch(): void {
     const proc = this.spawn(
       this.options.ffmpeg ?? "ffmpeg",
-      feederArgs(this.options.rtspUrl, this.fps, this.options.encoder ?? "libx264")
+      feederArgs(this.options.rtspUrl, this.fps, this.options.encoder ?? "libx264", this.options.audio === true)
     );
     this.process = proc;
     this.draining = false;
+    this.audioDraining = false;
+    this.audioStartedAt = Date.now();
+    this.audioSent = 0;
     const startedAt = Date.now();
     const ended = (reason: string) => {
       // A process that was replaced or stopped on purpose is not a failure.
@@ -249,6 +359,10 @@ export interface PipgmFeedersOptions {
   ffmpeg?: string | undefined;
   encoder?: FeederEncoder | undefined;
   fps?: number | undefined;
+  /** Publish an audio track on every feed, default true (PIPGM_PUBLISH_AUDIO=0 turns it off). */
+  audio?: boolean | undefined;
+  /** The samples of a playing audio item as 48 kHz stereo s16le, or null when they cannot be read. */
+  audioPcm?: ((snapshot: PiPgmPipelineSnapshot) => Promise<Buffer | null>) | undefined;
   /** How often the pipelines are looked at for a change, default 250 ms. */
   intervalMs?: number | undefined;
   spawn?: SpawnFeeder | undefined;
@@ -276,6 +390,7 @@ export function pictureKey(snapshot: PiPgmPipelineSnapshot): string {
 export class PipgmFeeders {
   private readonly feeders = new Map<PiPgmPipelineId, StillFeeder>();
   private readonly shown = new Map<PiPgmPipelineId, string>();
+  private readonly heard = new Map<PiPgmPipelineId, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -288,6 +403,7 @@ export class PipgmFeeders {
           ffmpeg: options.ffmpeg,
           encoder: options.encoder,
           fps: options.fps,
+          audio: options.audio ?? true,
           spawn: options.spawn,
           onError: (message) => options.onError?.(id, message)
         })
@@ -311,6 +427,7 @@ export class PipgmFeeders {
     this.timer = null;
     for (const feeder of this.feeders.values()) feeder.stop();
     this.shown.clear();
+    this.heard.clear();
   }
 
   /** One pass over the pipelines. Overlapping passes are skipped (a render can take a while). */
@@ -324,9 +441,33 @@ export class PipgmFeeders {
     }
   }
 
+  /** Starts or stops the clip of a feed when its audio track, arming or volume changes. */
+  private async followAudio(id: PiPgmPipelineId, snapshot: PiPgmPipelineSnapshot): Promise<void> {
+    const feeder = this.feeders.get(id)!;
+    feeder.setGain(snapshot.effectiveVolume / 100);
+    const track = snapshot.audioEnabled ? snapshot.audioTrack : null;
+    const key = track?.playId ?? "";
+    if (this.heard.get(id) === key) return;
+    this.heard.set(id, key);
+    if (!track) {
+      feeder.stopClip();
+      return;
+    }
+    try {
+      const pcm = await this.options.audioPcm?.(snapshot);
+      // Stopped or replaced while the samples were being read: leave the newer state alone.
+      if (this.heard.get(id) !== key) return;
+      if (pcm) feeder.playClip(pcm, track.loop);
+      else this.options.onError?.(id, `audio ${track.itemId} could not be read`);
+    } catch (error) {
+      this.options.onError?.(id, error instanceof Error ? error.message : String(error));
+    }
+  }
+
   private async follow(id: PiPgmPipelineId): Promise<void> {
     const snapshot = this.options.service.getPipeline(id);
     if (!snapshot) return;
+    await this.followAudio(id, snapshot);
     const key = pictureKey(snapshot);
     if (this.shown.get(id) === key) return;
     const { width, height } = snapshot.resolution;
@@ -356,4 +497,22 @@ export class PipgmFeeders {
       this.options.onError?.(id, error instanceof Error ? error.message : String(error));
     }
   }
+}
+
+/** Decodes any audio file ffmpeg reads to 48 kHz stereo s16le, the format of a feed's audio track. */
+export function decodeToPcm(
+  ffmpeg: string,
+  input: Buffer,
+  spawn: (command: string, args: string[]) => { stdin: { end(data: Buffer): void } | null; stdout: NodeJS.ReadableStream | null; once(event: "error" | "close", listener: (arg?: unknown) => void): unknown } = (command, args) =>
+    nodeSpawn(command, args, { stdio: ["pipe", "pipe", "ignore"] })
+): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const child = spawn(ffmpeg, ["-hide_banner", "-nostdin", "-loglevel", "error", "-i", "pipe:0", "-f", "s16le", "-ar", String(AUDIO_RATE), "-ac", "2", "pipe:1"]);
+    const parts: Buffer[] = [];
+    child.stdout?.on("data", (part: Buffer) => parts.push(part));
+    child.once("error", () => resolve(null));
+    child.once("close", (code) => resolve(code === 0 && parts.length > 0 ? Buffer.concat(parts) : null));
+    (child.stdin as unknown as { on?(event: "error", listener: () => void): void } | null)?.on?.("error", () => undefined);
+    child.stdin?.end(input);
+  });
 }
