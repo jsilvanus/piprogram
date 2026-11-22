@@ -25,6 +25,7 @@ import { CanvaPackages, imageTypeOf, numberPages } from "./canva-package.js";
 import { StepImages, ffmpegRenderCustomVariant, ffmpegThumbnailer, isSupportedImageBuffer, variantResolution, type StepVariant, type Thumbnailer, type VariantRenderOptions } from "./step-cache.js";
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
+import type { EncoderSelector } from "./encoder.js";
 import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
@@ -55,7 +56,7 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
    * Publish the three feeds (PiPGM1-3) to MediaMTX from this process. Undefined = off.
    * Starts when the server is ready and stops when it closes.
    */
-  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder; fps?: number; spawn?: SpawnFeeder };
+  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder | EncoderSelector; idleStopSeconds?: number; fps?: number; spawn?: SpawnFeeder };
 }
 
 const FRAME_MIN_SIDE = 16;
@@ -273,6 +274,8 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         rtspBase: options.publish.rtspBase,
         ffmpeg: options.publish.ffmpeg,
         encoder: options.publish.encoder,
+        idleStopSeconds: options.publish.idleStopSeconds,
+        onFallback: (message) => app.log.warn(message),
         fps: options.publish.fps,
         spawn: options.publish.spawn,
         steps,
@@ -481,7 +484,8 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   app.get("/api/v1/pipgm/feeders", async () => ({
     enabled: feeders !== null,
-    feeds: feeders ? feeders.status() : {}
+    feeds: feeders ? feeders.status() : {},
+    ...(feeders ? feeders.encoderInfo() : {})
   }));
 
   // The stage page is silent unless opened with ?audio=1 (the link the sound-capturing page worker uses),

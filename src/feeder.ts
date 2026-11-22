@@ -22,7 +22,9 @@ import type { PiPgmService } from "./pipgm-service.js";
 import type { PipgmFrameRenderer } from "./frame.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 
-export type FeederEncoder = "libx264" | "h264_v4l2m2m";
+import { EncoderSelector, type FeederEncoder } from "./encoder.js";
+
+export type { FeederEncoder } from "./encoder.js";
 
 export interface FeederProcess {
   stdin: { write(chunk: Buffer): boolean; once(event: "drain", listener: () => void): unknown; end(): void } | null;
@@ -92,7 +94,12 @@ export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder,
 export interface StillFeederOptions {
   rtspUrl: string;
   ffmpeg?: string | undefined;
-  encoder?: FeederEncoder | undefined;
+  /** A fixed encoder, or a function read at every (re)launch so a fallback takes effect. */
+  encoder?: FeederEncoder | (() => FeederEncoder) | undefined;
+  /** Called when a h264_v4l2m2m ffmpeg exits within `earlyExitMs` of its start. */
+  onEarlyExit?: ((reason: string) => void) | undefined;
+  /** Default 3000 ms. */
+  earlyExitMs?: number | undefined;
   fps?: number | undefined;
   /** Input pipe framerate (PNG decodes/sec). Default 1 so ffmpeg duplicates frames to `fps`. */
   inputFps?: number | undefined;
@@ -172,6 +179,16 @@ export class StillFeeder {
     }
   }
 
+  /** Relaunch ffmpeg now (new encoder after a fallback). No effect while stopped or without a picture. */
+  restartProcess(): void {
+    if (this.stopped || !this.frame) return;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    this.failuresInARow = 0;
+    this.killProcess();
+    this.launch();
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
@@ -197,10 +214,9 @@ export class StillFeeder {
   }
 
   private launch(): void {
-    const proc = this.spawn(
-      this.options.ffmpeg ?? "ffmpeg",
-      feederArgs(this.options.rtspUrl, this.fps, this.options.encoder ?? "libx264", this.inputFps)
-    );
+    const configured = this.options.encoder;
+    const encoder: FeederEncoder = (typeof configured === "function" ? configured() : configured) ?? "libx264";
+    const proc = this.spawn(this.options.ffmpeg ?? "ffmpeg", feederArgs(this.options.rtspUrl, this.fps, encoder, this.inputFps));
     this.process = proc;
     this.draining = false;
     const startedAt = Date.now();
@@ -212,7 +228,13 @@ export class StillFeeder {
       if (Date.now() - startedAt >= 10_000) this.failuresInARow = 0;
       this.fail(reason);
     };
-    proc.onExit((code) => ended(`ffmpeg exited with ${code ?? "a signal"}`));
+    proc.onExit((code) => {
+      const current = this.process === proc;
+      const early = Date.now() - startedAt < (this.options.earlyExitMs ?? 3000);
+      const reason = `ffmpeg exited with ${code ?? "a signal"}`;
+      ended(reason);
+      if (current && early && encoder === "h264_v4l2m2m") this.options.onEarlyExit?.(reason);
+    });
     proc.onError((error) => ended(error.message));
     proc.stdin?.once("drain", () => undefined);
     (proc.stdin as unknown as { on?(event: "error", listener: () => void): void } | null)?.on?.("error", () => undefined);
@@ -255,7 +277,12 @@ export interface PipgmFeedersOptions {
   /** e.g. rtsp://127.0.0.1:8554 ; the stream of PiPGM1 is <base>/PiPGM1. */
   rtspBase: string;
   ffmpeg?: string | undefined;
-  encoder?: FeederEncoder | undefined;
+  /** Fixed encoder (no fallback) or a selector that can fall back to libx264. Default libx264. */
+  encoder?: FeederEncoder | EncoderSelector | undefined;
+  /** Seconds a pipeline may have no slide before its feeder is stopped; 0/undefined = never. */
+  idleStopSeconds?: number | undefined;
+  /** Called once when the hardware encoder failed early and the feeders switched to libx264. */
+  onFallback?: ((message: string) => void) | undefined;
   fps?: number | undefined;
   /** How often the pipelines are looked at for a change, default 250 ms. */
   intervalMs?: number | undefined;
@@ -280,21 +307,38 @@ export function pictureKey(snapshot: PiPgmPipelineSnapshot): string {
   ].join("|");
 }
 
+/**
+ * True when the pipeline has something to show or is armed: an active item, a basic image, or a loaded
+ * playlist (the pre-warm signal: a loaded playlist means a slide is about to be queued).
+ */
+export function hasContent(snapshot: PiPgmPipelineSnapshot): boolean {
+  return snapshot.activeItemId !== null || snapshot.basicImageItemId !== null || snapshot.playlist.length > 0;
+}
+
+export type FeederState = "running" | "idle-stopped" | "stopped";
+export type PipgmFeederStatus = StillFeederStatus & { state: FeederState };
+
 /** Follows the three pipelines in this process and keeps their feeds up to date. */
 export class PipgmFeeders {
   private readonly feeders = new Map<PiPgmPipelineId, StillFeeder>();
   private readonly shown = new Map<PiPgmPipelineId, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private readonly idleSince = new Map<PiPgmPipelineId, number>();
+  private readonly idleStopped = new Set<PiPgmPipelineId>();
+  private readonly selector: EncoderSelector;
 
   constructor(private readonly options: PipgmFeedersOptions) {
+    const enc = options.encoder;
+    this.selector = enc instanceof EncoderSelector ? enc : EncoderSelector.fixed(enc ?? "libx264");
     for (const id of FEED_IDS) {
       this.feeders.set(
         id,
         new StillFeeder({
           rtspUrl: `${options.rtspBase.replace(/\/$/, "")}/${id}`,
           ffmpeg: options.ffmpeg,
-          encoder: options.encoder,
+          encoder: () => this.selector.current,
+          onEarlyExit: (reason) => this.encoderFailed(reason),
           fps: options.fps,
           spawn: options.spawn,
           onError: (message) => options.onError?.(id, message)
@@ -303,8 +347,29 @@ export class PipgmFeeders {
     }
   }
 
-  status(): Record<string, StillFeederStatus> {
-    return Object.fromEntries(FEED_IDS.map((id) => [id, this.feeders.get(id)!.status()]));
+  status(): Record<string, PipgmFeederStatus> {
+    return Object.fromEntries(
+      FEED_IDS.map((id) => {
+        const status = this.feeders.get(id)!.status();
+        const state: FeederState = this.idleStopped.has(id) ? "idle-stopped" : status.running ? "running" : "stopped";
+        return [id, { ...status, state }];
+      })
+    );
+  }
+
+  /** The encoder in use and whether a fallback happened. */
+  encoderInfo(): { encoder: FeederEncoder; fallback: boolean; idleStopSeconds: number } {
+    return {
+      encoder: this.selector.current,
+      fallback: this.selector.fallenBack,
+      idleStopSeconds: this.options.idleStopSeconds ?? 0
+    };
+  }
+
+  private encoderFailed(reason: string): void {
+    if (!this.selector.noteEarlyFailure()) return;
+    this.options.onFallback?.(`h264_v4l2m2m failed within its first seconds (${reason}); using libx264 from now on`);
+    for (const feeder of this.feeders.values()) feeder.restartProcess();
   }
 
   start(): void {
@@ -319,6 +384,8 @@ export class PipgmFeeders {
     this.timer = null;
     for (const feeder of this.feeders.values()) feeder.stop();
     this.shown.clear();
+    this.idleSince.clear();
+    this.idleStopped.clear();
   }
 
   /** One pass over the pipelines. Overlapping passes are skipped (a render can take a while). */
@@ -335,6 +402,24 @@ export class PipgmFeeders {
   private async follow(id: PiPgmPipelineId): Promise<void> {
     const snapshot = this.options.service.getPipeline(id);
     if (!snapshot) return;
+    const idleMs = (this.options.idleStopSeconds ?? 0) * 1000;
+    if (idleMs > 0) {
+      if (hasContent(snapshot)) {
+        this.idleSince.delete(id);
+        if (this.idleStopped.delete(id)) this.shown.delete(id); // a slide (or armed playlist): start again at once
+      } else if (this.idleStopped.has(id)) {
+        return;
+      } else {
+        const since = this.idleSince.get(id) ?? Date.now();
+        this.idleSince.set(id, since);
+        if (this.shown.has(id) && Date.now() - since >= idleMs) {
+          this.feeders.get(id)!.stop();
+          this.idleStopped.add(id);
+          this.shown.delete(id);
+          return;
+        }
+      }
+    }
     const key = pictureKey(snapshot);
     if (this.shown.get(id) === key) return;
     const { width, height } = snapshot.resolution;
