@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { inflateSync } from "node:zlib";
 import { PipgmFeeders, StillFeeder, feederArgs, pictureKey, solidPng, type FeederProcess } from "./feeder.js";
+import { EncoderSelector, createEncoderSelector } from "./encoder.js";
 import { PiPgmService } from "./pipgm-service.js";
 import { buildPipgmServer } from "./server.js";
 
@@ -238,4 +239,128 @@ test("the feeders route reports whether publishing is on", async () => {
   assert.equal(body.feeds.PiPGM1!.running, true);
   await on.close();
   assert.ok(procs.every((p) => p.killed), "closing the server stops every ffmpeg");
+});
+
+test("idle stop: an empty pipeline's ffmpeg is stopped after the idle time and restarted when a slide appears", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  const service = new PiPgmService();
+  service.createHymnItem({ title: "Virsi", stanzas: [{ lines: ["a"] }], targetPipelineId: "PiPGM1", cueImmediately: true });
+  const { procs, spawn } = fakeSpawn();
+  const feeders = new PipgmFeeders({
+    service,
+    rtspBase: "rtsp://x",
+    spawn,
+    idleStopSeconds: 10,
+    renderFrame: async () => Buffer.from("frame")
+  });
+  await feeders.tick();
+  assert.equal(procs.length, 3);
+  assert.equal(feeders.status().PiPGM2?.state, "running");
+  t.mock.timers.tick(9_000);
+  await feeders.tick();
+  assert.equal(feeders.status().PiPGM2?.state, "running", "not yet");
+  t.mock.timers.tick(1_500);
+  await feeders.tick();
+  assert.equal(feeders.status().PiPGM2?.state, "idle-stopped");
+  assert.equal(feeders.status().PiPGM2?.running, false);
+  assert.equal(procs[1]!.killed, true, "ffmpeg of the idle feed is killed");
+  assert.equal(procs[0]!.killed, false, "a pipeline with a slide keeps its feed");
+  assert.equal(feeders.status().PiPGM1?.state, "running");
+  await feeders.tick();
+  assert.equal(procs.length, 3, "stays stopped while idle");
+  // A slide appears on PiPGM2: started again at once.
+  service.createHymnItem({ title: "Toinen", stanzas: [{ lines: ["b"] }], targetPipelineId: "PiPGM2", cueImmediately: true });
+  await feeders.tick();
+  assert.equal(procs.length, 4);
+  assert.equal(feeders.status().PiPGM2?.state, "running");
+  feeders.stop();
+});
+
+test("idle stop off by default: nothing is stopped", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  const { procs, spawn } = fakeSpawn();
+  const feeders = new PipgmFeeders({ service: new PiPgmService(), rtspBase: "rtsp://x", spawn, renderFrame: async () => Buffer.from("f") });
+  await feeders.tick();
+  t.mock.timers.tick(3_600_000);
+  await feeders.tick();
+  assert.ok(procs.every((p) => !p.killed));
+  assert.equal(feeders.status().PiPGM1?.state, "running");
+  feeders.stop();
+});
+
+test("pre-warm: a loaded playlist is not idle and keeps the feed", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  const service = new PiPgmService();
+  service.createHymnItem({ title: "Virsi", stanzas: [{ lines: ["a"] }], targetPipelineId: "PiPGM2" });
+  const snapshot = service.getPipeline("PiPGM2")!;
+  assert.ok(snapshot.playlist.length > 0);
+  const { spawn } = fakeSpawn();
+  const feeders = new PipgmFeeders({ service, rtspBase: "rtsp://x", spawn, idleStopSeconds: 5, renderFrame: async () => Buffer.from("f") });
+  await feeders.tick();
+  t.mock.timers.tick(60_000);
+  await feeders.tick();
+  assert.equal(feeders.status().PiPGM2?.state, "running");
+  assert.equal(feeders.status().PiPGM3?.state, "idle-stopped");
+  feeders.stop();
+});
+
+test("early failure of h264_v4l2m2m restarts all feeders with libx264 and remembers it", async () => {
+  const { procs, calls, spawn } = fakeSpawn();
+  const warnings: string[] = [];
+  const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
+  const feeders = new PipgmFeeders({
+    service: new PiPgmService(),
+    rtspBase: "rtsp://x",
+    spawn,
+    encoder: selector,
+    renderFrame: async () => Buffer.from("f"),
+    onFallback: (m) => warnings.push(m)
+  });
+  await feeders.tick();
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((c) => c.includes("h264_v4l2m2m")));
+  procs[0]!.crash(1);
+  assert.equal(warnings.length, 1);
+  assert.equal(selector.current, "libx264");
+  assert.equal(feeders.encoderInfo().fallback, true);
+  assert.equal(calls.length, 3 + 3, "all three relaunched at once");
+  assert.ok(calls.slice(3).every((c) => c.includes("libx264") && !c.includes("h264_v4l2m2m")));
+  procs[1]!.crash(1); // the old, already replaced process: no second warning
+  assert.equal(warnings.length, 1);
+  feeders.stop();
+});
+
+test("a late exit of h264_v4l2m2m does not trigger the fallback; explicit fallback off never does", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
+  const { procs, spawn } = fakeSpawn();
+  const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x", spawn, encoder: () => selector.current, onEarlyExit: () => selector.noteEarlyFailure() });
+  feeder.show(Buffer.from("a"), 10, 10);
+  t.mock.timers.tick(4_000);
+  procs[0]!.crash(1);
+  assert.equal(selector.current, "h264_v4l2m2m");
+  feeder.stop();
+  const off = new EncoderSelector({ setting: "h264_v4l2m2m", fallbackEnabled: false });
+  assert.equal(off.noteEarlyFailure(), false);
+  assert.equal(off.current, "h264_v4l2m2m");
+  assert.equal(EncoderSelector.fixed("libx264").noteEarlyFailure(), false);
+});
+
+test("auto encoder: probe on Linux only, cached by the selector", async () => {
+  const listing = " V....D h264_v4l2m2m         V4L2 mem2mem H.264 encoder wrapper\n V....D libx264 x";
+  let probes = 0;
+  const run = async () => {
+    probes += 1;
+    return listing;
+  };
+  assert.equal((await createEncoderSelector({ setting: "auto", platform: "linux", run })).current, "h264_v4l2m2m");
+  assert.equal(probes, 1);
+  assert.equal((await createEncoderSelector({ setting: "auto", platform: "darwin", run })).current, "libx264");
+  assert.equal((await createEncoderSelector({ setting: "auto", platform: "win32", run })).current, "libx264");
+  assert.equal(probes, 1, "no probe off Linux");
+  assert.equal((await createEncoderSelector({ setting: "auto", platform: "linux", run: async () => " V....D libx264 x" })).current, "libx264");
+  assert.equal((await createEncoderSelector({ setting: "auto", platform: "linux", run: async () => { throw new Error("no ffmpeg"); } })).current, "libx264");
+  assert.equal((await createEncoderSelector({ setting: "libx264", platform: "linux", run })).current, "libx264");
+  assert.equal(probes, 1, "explicit setting needs no probe");
+  assert.equal((await createEncoderSelector({ setting: "h264_v4l2m2m", platform: "darwin", run })).current, "h264_v4l2m2m");
 });

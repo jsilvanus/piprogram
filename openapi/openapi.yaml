@@ -114,7 +114,7 @@ paths:
         "422":
           $ref: "#/components/responses/Invalid"
         "503":
-          description: No browser for the frame route (set PIPGM_CHROMIUM)
+          description: No browser for the frame route (set PIPGM_CHROMIUM); the renderer keeps one headless Chromium running between renders
           content:
             application/json:
               schema:
@@ -348,11 +348,25 @@ paths:
                 properties:
                   enabled:
                     type: boolean
+                  encoder:
+                    type: string
+                    enum: [libx264, h264_v4l2m2m]
+                    description: Encoder in use now (PIPGM_PUBLISH_ENCODER, auto resolves at start).
+                  fallback:
+                    type: boolean
+                    description: True when h264_v4l2m2m failed early and libx264 took over for this process.
+                  idleStopSeconds:
+                    type: integer
+                    description: PIPGM_FEED_IDLE_STOP_SECONDS; 0 = idle stop off.
                   feeds:
                     type: object
                     additionalProperties:
                       type: object
                       properties:
+                        state:
+                          type: string
+                          enum: [running, idle-stopped, stopped]
+                          description: idle-stopped = ffmpeg stopped because the pipeline had no slide for the idle time.
                         running:
                           type: boolean
                         width:
