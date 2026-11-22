@@ -63,7 +63,7 @@ test("a keyed feed renders with the key colour and skips the prepared pictures; 
   service.updatePipelineConfig("PiPGM1", { keyColor: "#00b140" });
   const htmls: Record<string, string> = {};
   const looked: string[] = [];
-  const feeders = new PipgmFeeders({
+  const feeders = new PipgmFeeders({ feedInput: "png",
     service,
     rtspBase: "rtsp://x/",
     fps: 25,

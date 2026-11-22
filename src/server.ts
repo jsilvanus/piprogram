@@ -26,7 +26,7 @@ import { StepImages, ffmpegRenderCustomVariant, ffmpegThumbnailer, isSupportedIm
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
 import type { EncoderSelector } from "./encoder.js";
-import { PipgmFeeders, type FeederEncoder, type SpawnFeeder } from "./feeder.js";
+import { PipgmFeeders, type FeedInput, type FeederEncoder, type PngToRaw, type SpawnFeeder } from "./feeder.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** How often an unloaded library or unsaved items are retried against the store (default 60 s). */
@@ -56,7 +56,7 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
    * Publish the three feeds (PiPGM1-3) to MediaMTX from this process. Undefined = off.
    * Starts when the server is ready and stops when it closes.
    */
-  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder | EncoderSelector; idleStopSeconds?: number; fps?: number; spawn?: SpawnFeeder };
+  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder | EncoderSelector; idleStopSeconds?: number; fps?: number; spawn?: SpawnFeeder; feedInput?: FeedInput; convert?: PngToRaw };
 }
 
 const FRAME_MIN_SIDE = 16;
@@ -277,6 +277,8 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         idleStopSeconds: options.publish.idleStopSeconds,
         onFallback: (message) => app.log.warn(message),
         fps: options.publish.fps,
+        feedInput: options.publish.feedInput,
+        convert: options.publish.convert,
         spawn: options.publish.spawn,
         steps,
         onError: (pipelineId, message) => app.log.warn({ pipelineId, err: message }, "feed publisher")

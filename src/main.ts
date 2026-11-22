@@ -28,6 +28,8 @@ async function main(): Promise<void> {
   if (!Number.isFinite(idleStopSeconds) || idleStopSeconds < 0) {
     throw new Error("PIPGM_FEED_IDLE_STOP_SECONDS must be 0 (off) or a number of seconds");
   }
+  const feedInput = process.env.PIPGM_FEED_INPUT?.trim().toLowerCase() || "raw";
+  if (feedInput !== "raw" && feedInput !== "png") throw new Error("PIPGM_FEED_INPUT must be raw or png");
   const fps = process.env.PIPGM_PUBLISH_FPS ? Number(process.env.PIPGM_PUBLISH_FPS) : undefined;
   if (fps !== undefined && (!Number.isInteger(fps) || fps < 1 || fps > 30)) {
     throw new Error("PIPGM_PUBLISH_FPS must be a whole number from 1 to 30");
@@ -58,6 +60,7 @@ async function main(): Promise<void> {
             ...(process.env.PIPGM_FFMPEG?.trim() ? { ffmpeg: process.env.PIPGM_FFMPEG.trim() } : {}),
             encoder: encoderSelector,
             idleStopSeconds,
+            feedInput,
             ...(fps ? { fps } : {})
           }
         }

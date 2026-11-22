@@ -2,7 +2,7 @@
  * Publishes the three PiPGM feeds (PiPGM1-3) to MediaMTX, so piprogram pushes its own
  * pictures instead of pimatrix polling for them.
  *
- * One long-running ffmpeg per pipeline reads PNG frames from stdin (`image2pipe`) and
+ * One long-running ffmpeg per pipeline reads frames from stdin (raw yuv420p, decoded once per picture; or PNG) and
  * publishes them over RTSP. A timer writes the current picture at a steady rate; a slide
  * change only swaps which picture the timer writes. The same process keeps running, so
  * the stream never drops and the HDMI player on the other side never sees a gap (the old
@@ -66,22 +66,51 @@ export function solidPng(width: number, height: number, rgb: [number, number, nu
   ]);
 }
 
-/** The ffmpeg command line of one feed: PNG frames on stdin, H.264 over RTSP. Pure. */
-export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder, inputFps = fps): string[] {
+/** What the feed's ffmpeg reads on stdin: PNG files (decoded by ffmpeg each time) or raw yuv420p frames. */
+export type FeedInput = "raw" | "png";
+
+/** Even size ffmpeg works at: the same `trunc(iw/2)*2` rule the PNG path applies with its scale filter. */
+export function evenSize(width: number, height: number): { width: number; height: number } {
+  return { width: width - (width % 2), height: height - (height % 2) };
+}
+
+/** Bytes of one raw yuv420p frame of this (even) size. */
+export function rawFrameBytes(width: number, height: number): number {
+  const even = evenSize(width, height);
+  return (even.width * even.height * 3) / 2;
+}
+
+/**
+ * The ffmpeg command line of one feed: H.264 over RTSP. Input is PNG frames on stdin, or, with `raw`, raw
+ * yuv420p frames of that size (no decoding in ffmpeg). Pure.
+ */
+export function feederArgs(
+  rtspUrl: string,
+  fps: number,
+  encoder: FeederEncoder,
+  inputFps = fps,
+  raw?: { width: number; height: number }
+): string[] {
   const encoderArgs =
     encoder === "h264_v4l2m2m"
       ? ["-c:v", "h264_v4l2m2m", "-b:v", "2M"]
       : ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-bf", "0"];
+  const even = raw ? evenSize(raw.width, raw.height) : null;
+  const input = even
+    ? ["-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", `${even.width}x${even.height}`, "-framerate", String(inputFps), "-i", "-", "-an", "-vf", "format=yuv420p"]
+    : [
+        "-f", "image2pipe",
+        "-framerate", String(inputFps),
+        "-c:v", "png",
+        "-i", "-",
+        "-an",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
+      ];
   return [
     "-hide_banner",
     "-nostdin",
     "-loglevel", "warning",
-    "-f", "image2pipe",
-    "-framerate", String(inputFps),
-    "-c:v", "png",
-    "-i", "-",
-    "-an",
-    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+    ...input,
     ...encoderArgs,
     "-r", String(fps),
     "-g", String(fps),
@@ -89,6 +118,44 @@ export function feederArgs(rtspUrl: string, fps: number, encoder: FeederEncoder,
     "-rtsp_transport", "tcp",
     rtspUrl
   ];
+}
+
+/** Turns a PNG into one raw yuv420p frame (even size). Rejects on any failure; the feeder then falls back to PNG. */
+export type PngToRaw = (png: Buffer, width: number, height: number) => Promise<Buffer>;
+
+/** One-shot ffmpeg conversion, run once per picture change. */
+export function ffmpegPngToRaw(ffmpeg = "ffmpeg", timeoutMs = 20_000): PngToRaw {
+  return (png, width, height) =>
+    new Promise<Buffer>((resolve, reject) => {
+      const child = nodeSpawn(
+        ffmpeg,
+        [
+          "-hide_banner", "-nostdin", "-loglevel", "error",
+          "-f", "image2pipe", "-c:v", "png", "-i", "-",
+          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+          "-frames:v", "1", "-f", "rawvideo", "-"
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] }
+      );
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+      child.stdout.on("data", (c: Buffer) => out.push(c));
+      child.stderr.on("data", (c: Buffer) => err.push(c));
+      child.on("error", (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        const raw = Buffer.concat(out);
+        if (code !== 0) reject(new Error(`ffmpeg exited with code ${code}: ${Buffer.concat(err).toString("utf8").slice(0, 200)}`));
+        else if (raw.length !== rawFrameBytes(width, height)) reject(new Error(`raw frame is ${raw.length} bytes, expected ${rawFrameBytes(width, height)}`));
+        else resolve(raw);
+      });
+      child.stdin.on("error", () => undefined);
+      child.stdin.end(png);
+    });
 }
 
 export interface StillFeederOptions {
@@ -101,8 +168,12 @@ export interface StillFeederOptions {
   /** Default 3000 ms. */
   earlyExitMs?: number | undefined;
   fps?: number | undefined;
-  /** Input pipe framerate (PNG decodes/sec). Default 1 so ffmpeg duplicates frames to `fps`. */
+  /** Input pipe framerate (frames written per second). Default 1 so ffmpeg duplicates frames to `fps`. */
   inputFps?: number | undefined;
+  /** `raw` (default): decode each picture once and feed raw yuv420p; `png`: feed the PNG every tick (old behaviour). */
+  input?: FeedInput | undefined;
+  /** Converter used in raw mode; default is a one-shot ffmpeg. */
+  convert?: PngToRaw | undefined;
   /** First restart delay, doubled up to maxRestartMs. Default 1000 ms. */
   restartBaseMs?: number | undefined;
   maxRestartMs?: number | undefined;
@@ -121,7 +192,13 @@ export interface StillFeederStatus {
 /** One feed: a long-running ffmpeg plus a timer that writes the current picture to it. */
 export class StillFeeder {
   private process: FeederProcess | null = null;
+  /** What is written each tick: the PNG, or its raw yuv420p decode. */
   private frame: Buffer | null = null;
+  private frameKind: FeedInput = "png";
+  private frameWidth = 0;
+  private frameHeight = 0;
+  /** The picture most recently passed to show(); a conversion that finishes late for an older one is dropped. */
+  private requested: Buffer | null = null;
   private width: number | null = null;
   private height: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -134,10 +211,14 @@ export class StillFeeder {
   private readonly fps: number;
   private readonly inputFps: number;
   private readonly spawn: SpawnFeeder;
+  private readonly input: FeedInput;
+  private readonly convert: PngToRaw;
 
   constructor(private readonly options: StillFeederOptions) {
     this.fps = options.fps ?? 5;
     this.inputFps = options.inputFps ?? Math.min(this.fps, 1);
+    this.input = options.input ?? "raw";
+    this.convert = options.convert ?? ffmpegPngToRaw(options.ffmpeg);
     this.spawn =
       options.spawn ??
       ((command, args) => {
@@ -161,22 +242,46 @@ export class StillFeeder {
     };
   }
 
-  /** Show this picture from now on. A new size restarts ffmpeg (one process cannot change size). */
+  /**
+   * Show this picture from now on. A new size restarts ffmpeg (one process cannot change size). In raw mode the
+   * PNG is decoded once here; until that is done the previous picture keeps being written. If the conversion
+   * fails the PNG itself is fed for this picture (ffmpeg decodes it, a restart switches the input type).
+   */
   show(png: Buffer, width: number, height: number): void {
-    const sizeChanged = this.width !== null && (this.width !== width || this.height !== height);
-    const frameChanged = this.frame !== png;
-    this.frame = png;
+    this.requested = png;
     this.width = width;
     this.height = height;
     this.stopped = false;
-    if (sizeChanged && this.process) this.killProcess();
-    const shouldLaunch = !this.process && !this.restartTimer;
-    if (shouldLaunch) this.launch();
-    else if (frameChanged && this.process) this.tick();
+    if (this.input === "png") {
+      this.apply(png, "png", width, height);
+    } else {
+      this.convert(png, width, height).then(
+        (raw) => {
+          if (this.requested === png && !this.stopped) this.apply(raw, "raw", width, height);
+        },
+        (error: unknown) => {
+          if (this.requested !== png || this.stopped) return;
+          this.options.onError?.(`raw conversion failed, feeding the PNG for this picture: ${error instanceof Error ? error.message : String(error)}`);
+          this.apply(png, "png", width, height);
+        }
+      );
+    }
     if (!this.timer) {
       this.timer = setInterval(() => this.tick(), Math.round(1000 / this.inputFps));
       this.timer.unref();
     }
+  }
+
+  private apply(frame: Buffer, kind: FeedInput, width: number, height: number): void {
+    const changedFormat = this.process !== null && (this.frameKind !== kind || this.frameWidth !== width || this.frameHeight !== height);
+    const frameChanged = this.frame !== frame;
+    this.frame = frame;
+    this.frameKind = kind;
+    this.frameWidth = width;
+    this.frameHeight = height;
+    if (changedFormat) this.killProcess();
+    if (!this.process && !this.restartTimer) this.launch();
+    else if (frameChanged && this.process) this.tick();
   }
 
   /** Relaunch ffmpeg now (new encoder after a fallback). No effect while stopped or without a picture. */
@@ -191,6 +296,7 @@ export class StillFeeder {
 
   stop(): void {
     this.stopped = true;
+    this.requested = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (this.restartTimer) clearTimeout(this.restartTimer);
@@ -216,7 +322,16 @@ export class StillFeeder {
   private launch(): void {
     const configured = this.options.encoder;
     const encoder: FeederEncoder = (typeof configured === "function" ? configured() : configured) ?? "libx264";
-    const proc = this.spawn(this.options.ffmpeg ?? "ffmpeg", feederArgs(this.options.rtspUrl, this.fps, encoder, this.inputFps));
+    const proc = this.spawn(
+      this.options.ffmpeg ?? "ffmpeg",
+      feederArgs(
+        this.options.rtspUrl,
+        this.fps,
+        encoder,
+        this.inputFps,
+        this.frameKind === "raw" ? { width: this.frameWidth, height: this.frameHeight } : undefined
+      )
+    );
     this.process = proc;
     this.draining = false;
     const startedAt = Date.now();
@@ -284,6 +399,10 @@ export interface PipgmFeedersOptions {
   /** Called once when the hardware encoder failed early and the feeders switched to libx264. */
   onFallback?: ((message: string) => void) | undefined;
   fps?: number | undefined;
+  /** `raw` (default) decodes each picture once and feeds raw frames; `png` feeds PNGs (old behaviour). */
+  feedInput?: FeedInput | undefined;
+  /** Test hook: replaces the one-shot ffmpeg PNG-to-raw conversion. */
+  convert?: PngToRaw | undefined;
   /** How often the pipelines are looked at for a change, default 250 ms. */
   intervalMs?: number | undefined;
   spawn?: SpawnFeeder | undefined;
@@ -340,6 +459,8 @@ export class PipgmFeeders {
           encoder: () => this.selector.current,
           onEarlyExit: (reason) => this.encoderFailed(reason),
           fps: options.fps,
+          input: options.feedInput,
+          convert: options.convert,
           spawn: options.spawn,
           onError: (message) => options.onError?.(id, message)
         })

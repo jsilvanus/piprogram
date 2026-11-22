@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { inflateSync } from "node:zlib";
-import { PipgmFeeders, StillFeeder, feederArgs, pictureKey, solidPng, type FeederProcess } from "./feeder.js";
+import { PipgmFeeders, StillFeeder, feederArgs, ffmpegPngToRaw, rawFrameBytes, pictureKey, solidPng, type FeederProcess } from "./feeder.js";
 import { EncoderSelector, createEncoderSelector } from "./encoder.js";
 import { PiPgmService } from "./pipgm-service.js";
 import { buildPipgmServer } from "./server.js";
@@ -71,7 +71,7 @@ test("feederArgs reads PNG frames from stdin and publishes over RTSP", () => {
 
 test("StillFeeder defaults inputFps to 1 and writes a new frame immediately", () => {
   const { procs, calls, spawn } = fakeSpawn();
-  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 5, spawn });
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 5, input: "png", spawn });
   feeder.show(Buffer.from("first"), 1920, 1080);
   assert.equal(calls[0]?.[calls[0].indexOf("-framerate") + 1], "1");
   assert.equal(calls[0]?.[calls[0].indexOf("-r") + 1], "5");
@@ -83,7 +83,7 @@ test("StillFeeder defaults inputFps to 1 and writes a new frame immediately", ()
 
 test("a new picture is swapped in without restarting ffmpeg", async () => {
   const { procs, spawn } = fakeSpawn();
-  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 50, spawn });
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 50, input: "png", spawn });
   const first = Buffer.from("first");
   const second = Buffer.from("second");
   feeder.show(first, 1920, 1080);
@@ -101,7 +101,7 @@ test("a new picture is swapped in without restarting ffmpeg", async () => {
 
 test("a different size restarts ffmpeg, the same size does not", async () => {
   const { procs, spawn } = fakeSpawn();
-  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 50, spawn });
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 50, input: "png", spawn });
   feeder.show(Buffer.from("a"), 1920, 1080);
   feeder.show(Buffer.from("b"), 1920, 1080);
   assert.equal(procs.length, 1);
@@ -117,6 +117,7 @@ test("a crashed ffmpeg is started again with a growing delay", async () => {
   const feeder = new StillFeeder({
     rtspUrl: "rtsp://x/PiPGM1",
     fps: 50,
+    input: "png",
     restartBaseMs: 20,
     spawn,
     onError: (message) => errors.push(message)
@@ -147,7 +148,7 @@ function setup() {
   const renders: number[] = [];
   const errors: string[] = [];
   let failNext = false;
-  const feeders = new PipgmFeeders({
+  const feeders = new PipgmFeeders({ feedInput: "png",
     service,
     rtspBase: "rtsp://127.0.0.1:8554/",
     fps: 50,
@@ -225,7 +226,7 @@ test("the feeders route reports whether publishing is on", async () => {
 
   const { spawn, procs } = fakeSpawn();
   const on = buildPipgmServer({
-    publish: { rtspBase: "rtsp://127.0.0.1:8554", spawn },
+    publish: { rtspBase: "rtsp://127.0.0.1:8554", spawn, feedInput: "png" },
     frameRenderer: async () => Buffer.from("png")
   });
   await on.ready();
@@ -246,7 +247,7 @@ test("idle stop: an empty pipeline's ffmpeg is stopped after the idle time and r
   const service = new PiPgmService();
   service.createHymnItem({ title: "Virsi", stanzas: [{ lines: ["a"] }], targetPipelineId: "PiPGM1", cueImmediately: true });
   const { procs, spawn } = fakeSpawn();
-  const feeders = new PipgmFeeders({
+  const feeders = new PipgmFeeders({ feedInput: "png",
     service,
     rtspBase: "rtsp://x",
     spawn,
@@ -279,7 +280,7 @@ test("idle stop: an empty pipeline's ffmpeg is stopped after the idle time and r
 test("idle stop off by default: nothing is stopped", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
   const { procs, spawn } = fakeSpawn();
-  const feeders = new PipgmFeeders({ service: new PiPgmService(), rtspBase: "rtsp://x", spawn, renderFrame: async () => Buffer.from("f") });
+  const feeders = new PipgmFeeders({ feedInput: "png", service: new PiPgmService(), rtspBase: "rtsp://x", spawn, renderFrame: async () => Buffer.from("f") });
   await feeders.tick();
   t.mock.timers.tick(3_600_000);
   await feeders.tick();
@@ -295,7 +296,7 @@ test("pre-warm: a loaded playlist is not idle and keeps the feed", async (t) => 
   const snapshot = service.getPipeline("PiPGM2")!;
   assert.ok(snapshot.playlist.length > 0);
   const { spawn } = fakeSpawn();
-  const feeders = new PipgmFeeders({ service, rtspBase: "rtsp://x", spawn, idleStopSeconds: 5, renderFrame: async () => Buffer.from("f") });
+  const feeders = new PipgmFeeders({ feedInput: "png", service, rtspBase: "rtsp://x", spawn, idleStopSeconds: 5, renderFrame: async () => Buffer.from("f") });
   await feeders.tick();
   t.mock.timers.tick(60_000);
   await feeders.tick();
@@ -308,7 +309,7 @@ test("early failure of h264_v4l2m2m restarts all feeders with libx264 and rememb
   const { procs, calls, spawn } = fakeSpawn();
   const warnings: string[] = [];
   const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
-  const feeders = new PipgmFeeders({
+  const feeders = new PipgmFeeders({ feedInput: "png",
     service: new PiPgmService(),
     rtspBase: "rtsp://x",
     spawn,
@@ -334,7 +335,7 @@ test("a late exit of h264_v4l2m2m does not trigger the fallback; explicit fallba
   t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"] });
   const { procs, spawn } = fakeSpawn();
   const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
-  const feeder = new StillFeeder({ rtspUrl: "rtsp://x", spawn, encoder: () => selector.current, onEarlyExit: () => selector.noteEarlyFailure() });
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x", spawn, input: "png", encoder: () => selector.current, onEarlyExit: () => selector.noteEarlyFailure() });
   feeder.show(Buffer.from("a"), 10, 10);
   t.mock.timers.tick(4_000);
   procs[0]!.crash(1);
@@ -363,4 +364,85 @@ test("auto encoder: probe on Linux only, cached by the selector", async () => {
   assert.equal((await createEncoderSelector({ setting: "libx264", platform: "linux", run })).current, "libx264");
   assert.equal(probes, 1, "explicit setting needs no probe");
   assert.equal((await createEncoderSelector({ setting: "h264_v4l2m2m", platform: "darwin", run })).current, "h264_v4l2m2m");
+});
+
+test("feederArgs raw mode reads raw yuv420p at the even size and has no PNG decoder", () => {
+  const args = feederArgs("rtsp://x/y", 5, "libx264", 1, { width: 1921, height: 1081 }).join(" ");
+  assert.ok(args.includes("-f rawvideo -pix_fmt yuv420p -s 1920x1080 -framerate 1 -i -"));
+  assert.ok(!args.includes("image2pipe") && !args.includes("-c:v png"));
+  assert.ok(args.includes("-r 5 -g 5"));
+  assert.equal(rawFrameBytes(1921, 1081), 1920 * 1080 * 1.5);
+});
+
+test("raw mode: the picture is converted once per change and the raw frame is what is written each tick", async () => {
+  const { procs, calls, spawn } = fakeSpawn();
+  const converted: Buffer[] = [];
+  const convert = async (png: Buffer) => {
+    converted.push(png);
+    return Buffer.from(`raw-of-${png.toString()}`);
+  };
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 50, inputFps: 50, input: "raw", convert, spawn });
+  feeder.show(Buffer.from("a"), 1920, 1080);
+  await sleep(100);
+  assert.equal(converted.length, 1, "decoded once, not per tick");
+  assert.ok(calls[0]!.join(" ").includes("-f rawvideo -pix_fmt yuv420p -s 1920x1080"));
+  assert.ok(procs[0]!.writes.length > 1);
+  assert.ok(procs[0]!.writes.every((w) => w.toString() === "raw-of-a"));
+  feeder.show(Buffer.from("b"), 1920, 1080);
+  await sleep(100);
+  assert.equal(procs.length, 1, "same size and format: no restart");
+  assert.equal(procs[0]!.writes.at(-1)!.toString(), "raw-of-b");
+  feeder.show(Buffer.from("c"), 1080, 1920);
+  await sleep(50);
+  assert.equal(procs.length, 2, "a size change restarts");
+  assert.ok(calls[1]!.join(" ").includes("-s 1080x1920"));
+  feeder.stop();
+});
+
+test("raw mode: a failed conversion feeds the PNG for that picture with a warning, then raw resumes", async () => {
+  const { procs, calls, spawn } = fakeSpawn();
+  const errors: string[] = [];
+  let fail = false;
+  const convert = async (png: Buffer) => {
+    if (fail) throw new Error("boom");
+    return Buffer.from(`raw-of-${png.toString()}`);
+  };
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 50, inputFps: 50, input: "raw", convert, spawn, onError: (m) => errors.push(m) });
+  feeder.show(Buffer.from("a"), 100, 100);
+  await sleep(30);
+  fail = true;
+  feeder.show(Buffer.from("b"), 100, 100);
+  await sleep(60);
+  assert.match(errors[0] ?? "", /raw conversion failed.*boom/);
+  assert.equal(procs.length, 2, "input type changed, so one restart");
+  assert.ok(calls[1]!.join(" ").includes("image2pipe"));
+  assert.ok(procs[1]!.writes.some((w) => w.toString() === "b"));
+  fail = false;
+  feeder.show(Buffer.from("c"), 100, 100);
+  await sleep(60);
+  assert.equal(procs.length, 3);
+  assert.ok(calls[2]!.join(" ").includes("rawvideo"));
+  feeder.stop();
+});
+
+test("raw mode: a conversion that finishes after a newer picture is dropped", async () => {
+  const { procs, spawn } = fakeSpawn();
+  const releases: Array<() => void> = [];
+  const convert = (png: Buffer) => new Promise<Buffer>((resolve) => releases.push(() => resolve(Buffer.from(`raw-${png.toString()}`))));
+  const feeder = new StillFeeder({ rtspUrl: "rtsp://x/PiPGM1", fps: 50, inputFps: 50, input: "raw", convert, spawn });
+  feeder.show(Buffer.from("old"), 100, 100);
+  feeder.show(Buffer.from("new"), 100, 100);
+  releases[1]!();
+  await sleep(30);
+  releases[0]!();
+  await sleep(30);
+  assert.ok(procs[0]!.writes.every((w) => w.toString() === "raw-new"));
+  feeder.stop();
+});
+
+test("ffmpegPngToRaw converts a real PNG to one even-sized yuv420p frame", async (t) => {
+  const raw = await ffmpegPngToRaw()(solidPng(5, 3, [255, 0, 0]), 5, 3).catch((e: Error) => e);
+  if (raw instanceof Error) return t.skip(`ffmpeg unavailable: ${raw.message}`);
+  assert.equal(raw.length, rawFrameBytes(5, 3));
+  assert.equal(raw.length, 4 * 2 * 1.5);
 });
