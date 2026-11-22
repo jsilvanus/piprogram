@@ -87,7 +87,7 @@ test("the feeder reads a prepared picture instead of rendering, and keeps a pict
   const { service, steps, renders, hymn } = setup();
   service.addItemToPipeline("PiPGM2", hymn.id, true);
   const shown: string[] = [];
-  const feeders = new PipgmFeeders({
+  const feeders = new PipgmFeeders({ feedInput: "png",
     service,
     rtspBase: "rtsp://x",
     fps: 50,
