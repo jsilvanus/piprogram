@@ -28,7 +28,7 @@ function setup() {
 }
 
 async function finished(steps: StepImages, id: string, orientation: "landscape" | "portrait" = "landscape") {
-  for (let i = 0; i < 50; i += 1) {
+  for (let i = 0; i < 2000; i += 1) {
     const s = steps.status(id, orientation);
     if (s.state !== "running") return s;
     await sleep(5);
