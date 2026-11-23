@@ -545,6 +545,13 @@ export class PiPgmService {
     return null;
   }
 
+  /** The file of an audio library item (null: no such item, not audio, or no bytes). */
+  async readAudioItemBytes(itemId: string): Promise<Buffer | null> {
+    const item = this.library.get(itemId);
+    if (!item || item.kind !== "audio" || !item.audio) return null;
+    return this.readAssetBytes(item.audio.assetId);
+  }
+
   setStepImages(steps: StepImages): void {
     this.stepImages = steps;
   }

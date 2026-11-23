@@ -27,6 +27,7 @@ import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
 import type { EncoderSelector } from "./encoder.js";
 import { PipgmFeeders, type FeedInput, type FeederEncoder, type PngToRaw, type SpawnFeeder } from "./feeder.js";
+import type { AudioToPcm } from "./feed-audio.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** How often an unloaded library or unsaved items are retried against the store (default 60 s). */
@@ -56,7 +57,7 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
    * Publish the three feeds (PiPGM1-3) to MediaMTX from this process. Undefined = off.
    * Starts when the server is ready and stops when it closes.
    */
-  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder | EncoderSelector; idleStopSeconds?: number; fps?: number; spawn?: SpawnFeeder; feedInput?: FeedInput; convert?: PngToRaw };
+  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder | EncoderSelector; idleStopSeconds?: number; fps?: number; spawn?: SpawnFeeder; feedInput?: FeedInput; convert?: PngToRaw; audio?: boolean; audioToPcm?: AudioToPcm };
 }
 
 const FRAME_MIN_SIDE = 16;
@@ -279,6 +280,9 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         fps: options.publish.fps,
         feedInput: options.publish.feedInput,
         convert: options.publish.convert,
+        ...(options.publish.audio
+          ? { audio: { load: (itemId: string) => service.readAudioItemBytes(itemId), toPcm: options.publish.audioToPcm } }
+          : {}),
         spawn: options.publish.spawn,
         steps,
         onError: (pipelineId, message) => app.log.warn({ pipelineId, err: message }, "feed publisher")

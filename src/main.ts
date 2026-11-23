@@ -34,6 +34,11 @@ async function main(): Promise<void> {
   if (fps !== undefined && (!Number.isInteger(fps) || fps < 1 || fps > 30)) {
     throw new Error("PIPGM_PUBLISH_FPS must be a whole number from 1 to 30");
   }
+  // Sound on the published feeds (TTS and audio items): off unless PIPGM_PUBLISH_AUDIO=1, because the stream then
+  // carries an AAC track and the player on the other side (pimatrix, hdmi) must accept it.
+  const audioEnv = process.env.PIPGM_PUBLISH_AUDIO?.trim().toLowerCase();
+  if (audioEnv && !["0", "1", "on", "off", "true", "false"].includes(audioEnv)) throw new Error("PIPGM_PUBLISH_AUDIO must be 1 or 0");
+  const publishAudio = audioEnv === "1" || audioEnv === "on" || audioEnv === "true";
   // The media library is kept in pistorage when PIPGM_STORAGE_URL is set; otherwise it is memory only.
   const storageUrl = process.env.PIPGM_STORAGE_URL?.trim();
   const blobStore = storageUrl
@@ -61,6 +66,7 @@ async function main(): Promise<void> {
             encoder: encoderSelector,
             idleStopSeconds,
             feedInput,
+            ...(publishAudio ? { audio: true } : {}),
             ...(fps ? { fps } : {})
           }
         }
