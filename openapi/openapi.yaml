@@ -256,6 +256,12 @@ paths:
                   minimum: 0
                   maximum: 100
                   description: Requested volume; the stage plays at most maxVolume (PIPGM_AUDIO_MAX_VOLUME)
+                level:
+                  type: string
+                  enum: [whisper, normal, loud, shout]
+                  description: >
+                    A named loudness instead of volume (not both). The numbers behind the names come from
+                    PIPGM_AUDIO_LEVELS (see GET /api/v1/pipgm/audio/levels) and are still capped by PIPGM_AUDIO_MAX_VOLUME.
                 armSeconds:
                   type: number
                   minimum: 1
@@ -295,6 +301,12 @@ paths:
                   type: number
                   minimum: 0
                   maximum: 100
+                level:
+                  type: string
+                  enum: [whisper, normal, loud, shout]
+                  description: >
+                    A named loudness instead of volume (not both). The numbers behind the names come from
+                    PIPGM_AUDIO_LEVELS (see GET /api/v1/pipgm/audio/levels) and are still capped by PIPGM_AUDIO_MAX_VOLUME.
       responses:
         "200":
           description: Pipeline after the change
@@ -380,6 +392,28 @@ paths:
                         lastError:
                           type: string
                           nullable: true
+  /api/v1/pipgm/audio/levels:
+    get:
+      operationId: getAudioLevels
+      tags: [Pipelines]
+      description: The volume (0-100) behind each level name, and the gain cap that applies to all of them.
+      responses:
+        "200":
+          description: Levels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  levels:
+                    type: object
+                    properties:
+                      whisper: {type: number}
+                      normal: {type: number}
+                      loud: {type: number}
+                      shout: {type: number}
+                  maxVolume:
+                    type: number
   /api/v1/pipgm/audio/kill:
     post:
       operationId: killAudio

@@ -35,6 +35,7 @@ import {
   type PiPgmPlaybackState,
   type PptxAnimationEffect
 } from "./pipgm-model.js";
+import { parseAudioLevels, type AudioLevels } from "./audio-levels.js";
 import { createTtsEngineFromEnv, readWavInfo, VOICE_NAME, type TtsEngine } from "./tts.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -166,6 +167,8 @@ export interface PiPgmServiceOptions {
   frameRenderer?: PipgmFrameRenderer | undefined;
   /** Highest volume (0-100) any feed plays at, whatever is requested. Default env PIPGM_AUDIO_MAX_VOLUME or 60. */
   audioMaxVolume?: number | undefined;
+  /** Volumes behind the level names whisper/normal/loud/shout. Default env PIPGM_AUDIO_LEVELS, else the provisional built-ins. */
+  audioLevels?: AudioLevels | undefined;
   /** How long arming lasts when the request gives no length. Default env PIPGM_AUDIO_ARM_SECONDS or 900. */
   audioArmSeconds?: number | undefined;
   /** Clock for tests (epoch ms). */
@@ -262,6 +265,12 @@ export class PiPgmService {
   private stepImages?: StepImages | undefined;
   private readonly ttsEngine: TtsEngine | undefined;
   readonly ttsMaxChars: number;
+  /** Highest volume any feed plays at (the gain cap). */
+  get maxAudioVolume(): number {
+    return this.audioMaxVolume;
+  }
+  /** The volume (0-100) each level name stands for. */
+  readonly audioLevels: AudioLevels;
   readonly ttsMaxSeconds: number;
   readonly audioMaxBytes: number;
   private readonly ttsMaxItems: number;
@@ -298,6 +307,7 @@ export class PiPgmService {
     this.audioMaxBytes = Math.round(options.audioMaxBytes ?? positiveFromEnv("PIPGM_AUDIO_MAX_BYTES", 20 * 1024 * 1024));
     this.ttsMaxItems = Math.round(options.ttsMaxItems ?? positiveFromEnv("PIPGM_TTS_MAX_ITEMS", 50));
     this.ttsMaxTotalBytes = Math.round(options.ttsMaxTotalBytes ?? positiveFromEnv("PIPGM_TTS_MAX_TOTAL_BYTES", 100 * 1024 * 1024));
+    this.audioLevels = options.audioLevels ?? parseAudioLevels(process.env.PIPGM_AUDIO_LEVELS);
     this.audioMaxVolume = Math.max(
       0,
       Math.min(100, Math.round(options.audioMaxVolume ?? numberFromEnv("PIPGM_AUDIO_MAX_VOLUME") ?? 60))

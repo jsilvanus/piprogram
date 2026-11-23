@@ -28,6 +28,7 @@ import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./pl
 import type { EncoderSelector } from "./encoder.js";
 import { PipgmFeeders, type FeedInput, type FeederEncoder, type PngToRaw, type SpawnFeeder } from "./feeder.js";
 import type { AudioToPcm } from "./feed-audio.js";
+import { AUDIO_LEVEL_NAMES, isAudioLevelName } from "./audio-levels.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** How often an unloaded library or unsaved items are retried against the store (default 60 s). */
@@ -265,6 +266,27 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     });
   const playlistNotFound = (reply: FastifyReply, id: string) =>
     reply.code(404).send({ error: { code: "PLAYLIST_NOT_FOUND", message: `Unknown saved playlist: ${id}` } });
+  /** A request names its loudness as `volume` (0-100) or `level` (whisper|normal|loud|shout), not both. */
+  const resolveVolume = (
+    volumeValue: unknown,
+    levelValue: unknown
+  ): { ok: true; volume: number | undefined } | { ok: false; code: string; message: string } => {
+    if (volumeValue !== undefined && levelValue !== undefined) {
+      return { ok: false, code: "VOLUME_AND_LEVEL", message: "give volume or level, not both" };
+    }
+    if (levelValue !== undefined) {
+      if (!isAudioLevelName(levelValue)) {
+        return { ok: false, code: "INVALID_LEVEL", message: `level must be one of ${AUDIO_LEVEL_NAMES.join(", ")}` };
+      }
+      return { ok: true, volume: service.audioLevels[levelValue] };
+    }
+    if (volumeValue === undefined) return { ok: true, volume: undefined };
+    const volume = Number(volumeValue);
+    if (!Number.isFinite(volume) || volume < 0 || volume > 100) {
+      return { ok: false, code: "INVALID_VOLUME", message: "volume must be between 0 and 100" };
+    }
+    return { ok: true, volume };
+  };
   const invalidPlaylist = (reply: FastifyReply, errors: string[]) =>
     reply.code(422).send({ error: { code: "INVALID_PLAYLIST", message: errors.join("; "), errors } });
 
@@ -708,17 +730,16 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   app.post<{
     Params: { pipelineId: string };
-    Body: { audioEnabled?: unknown; toggle?: unknown; volume?: unknown; armSeconds?: unknown; sync?: unknown };
+    Body: { audioEnabled?: unknown; toggle?: unknown; volume?: unknown; level?: unknown; armSeconds?: unknown; sync?: unknown };
   }>("/api/v1/pipgm/pipelines/:pipelineId/audio", async (request, reply) => {
     if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
     const body = request.body ?? {};
     if (body.audioEnabled !== undefined && typeof body.audioEnabled !== "boolean") {
       return invalid(reply, "INVALID_AUDIO_VALUE", "audioEnabled must be a boolean");
     }
-    const volume = body.volume !== undefined ? Number(body.volume) : undefined;
-    if (volume !== undefined && (!Number.isFinite(volume) || volume < 0 || volume > 100)) {
-      return invalid(reply, "INVALID_VOLUME", "volume must be between 0 and 100");
-    }
+    const resolved = resolveVolume(body.volume, body.level);
+    if (!resolved.ok) return invalid(reply, resolved.code, resolved.message);
+    const volume = resolved.volume;
     const armSeconds = body.armSeconds !== undefined ? Number(body.armSeconds) : undefined;
     if (
       armSeconds !== undefined &&
@@ -736,7 +757,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     return reply.code(200).send(updated);
   });
 
-  app.post<{ Params: { pipelineId: string }; Body: { itemId?: unknown; loop?: unknown; volume?: unknown } }>(
+  app.post<{ Params: { pipelineId: string }; Body: { itemId?: unknown; loop?: unknown; volume?: unknown; level?: unknown } }>(
     "/api/v1/pipgm/pipelines/:pipelineId/audio/play",
     async (request, reply) => {
       if (!service.isValidPipelineId(request.params.pipelineId)) return notFound(reply, request.params.pipelineId);
@@ -746,10 +767,9 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       if (body.loop !== undefined && typeof body.loop !== "boolean") {
         return invalid(reply, "INVALID_LOOP", "loop must be a boolean");
       }
-      const volume = body.volume !== undefined ? Number(body.volume) : undefined;
-      if (volume !== undefined && (!Number.isFinite(volume) || volume < 0 || volume > 100)) {
-        return invalid(reply, "INVALID_VOLUME", "volume must be between 0 and 100");
-      }
+      const resolved = resolveVolume(body.volume, body.level);
+      if (!resolved.ok) return invalid(reply, resolved.code, resolved.message);
+      const volume = resolved.volume;
       const result = service.playAudio(request.params.pipelineId, {
         itemId,
         ...(typeof body.loop === "boolean" ? { loop: body.loop } : {}),
@@ -778,6 +798,11 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       return reply.code(200).send(service.stopAudio(request.params.pipelineId));
     }
   );
+
+  // The volume behind each level name, and the cap that applies to all of them.
+  app.get("/api/v1/pipgm/audio/levels", async (_request, reply) => {
+    return reply.code(200).send({ levels: service.audioLevels, maxVolume: service.maxAudioVolume });
+  });
 
   // Kill switch: silences every pipeline, clears the tracks and disarms. Needs the API key like any write.
   app.post("/api/v1/pipgm/audio/kill", async (_request, reply) => {

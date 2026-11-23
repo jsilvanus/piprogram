@@ -26,11 +26,12 @@ const USAGE = `Usage: piprogram <command>
   pipelines sync <pipelineId>
   pipelines ftb <pipelineId> <on|off|toggle>
   pipelines audio <pipelineId> <on|off|toggle> [--seconds n]   (on = arm sound for n seconds, default from the server)
-  pipelines audio-play <pipelineId> <itemId> [--loop] [--volume n]
+  pipelines audio-play <pipelineId> <itemId> [--loop] [--volume n | --level whisper|normal|loud|shout]
   pipelines audio-stop <pipelineId>
   pipelines basic-image <pipelineId> <itemId|none>
   tts prepare <text> [--voice name]   (render a phrase to a WAV ahead of time; prints the audio item id)
   audio kill   (silence and disarm every pipeline)
+  audio levels (volumes behind whisper, normal, loud, shout)
   feeders   (state of the feed publishers to MediaMTX)
   pipelines orientation <pipelineId> <landscape|portrait>
   pipelines key <pipelineId> <#rrggbb|green|blue|off>   (chroma key colour for ATEM feeds; off = normal background)
@@ -174,10 +175,14 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const id = pipelineArg(rest[0]);
       if (!rest[1]) throw new Error("itemId is required");
       const volume = flag(rest, "--volume");
+      const level = flag(rest, "--level");
+      if (volume !== undefined && level !== undefined) throw new Error("give --volume or --level, not both");
+      if (level !== undefined && !["whisper", "normal", "loud", "shout"].includes(level)) throw new Error("level must be whisper, normal, loud or shout");
       await PipelinesService.playPipelineAudio(id, {
         itemId: rest[1],
         ...(hasFlag(rest, "--loop") ? { loop: true } : {}),
-        ...(volume !== undefined ? { volume: Number(volume) } : {})
+        ...(volume !== undefined ? { volume: Number(volume) } : {}),
+        ...(level !== undefined ? { level: level as "whisper" | "normal" | "loud" | "shout" } : {})
       });
       io.out(`${id}: playing ${rest[1]}`);
       return 0;
@@ -218,6 +223,11 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       for (const [id, feed] of Object.entries(state.feeds ?? {})) {
         io.out(`${id}: ${feed.running ? "running" : "down"} ${feed.width ?? "-"}x${feed.height ?? "-"} restarts ${feed.restarts ?? 0}${feed.lastError ? ` (${feed.lastError})` : ""}`);
       }
+      return 0;
+    }
+    if (group === "audio" && action === "levels") {
+      const { levels, maxVolume } = await PipelinesService.getAudioLevels();
+      io.out(`${Object.entries(levels ?? {}).map(([name, volume]) => `${name} ${volume}`).join(", ")} (cap ${maxVolume})`);
       return 0;
     }
     if (group === "audio" && action === "kill") {
