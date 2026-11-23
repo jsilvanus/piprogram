@@ -130,3 +130,26 @@ test("an ogg upload is converted to mp3 with its length", { skip: !haveFfmpeg },
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("hymnal prefixes filter hymn items; no prefix is the Virsikirja", async () => {
+  const hymn = (id: string, number: string) => item({ id, kind: "hymn", hymn: { hymnNumber: number, title: id, includeTitleSlide: false, stanzas: [] } });
+  const all = [hymn("a", "123"), hymn("b", "VK 5"), hymn("c", "LV 12"), item({ id: "d", kind: "image" })];
+  assert.deepEqual(queryLibrary(all, { hymnals: ["VK"] }).items.map((i) => i.id).sort(), ["a", "b"]);
+  assert.deepEqual(queryLibrary(all, { hymnals: ["lv"] }).items.map((i) => i.id), ["c"]);
+  assert.deepEqual(queryLibrary(all, { hymnals: ["VK"], types: ["hymn"] }).hymnals, [{ prefix: "LV", count: 1 }, { prefix: "VK", count: 2 }]);
+
+  const app = buildPipgmServer({ hymnals: [{ prefix: "VK", name: "Virsikirja" }, { prefix: "LV", name: "Lasten virsi" }] });
+  try {
+    const made = await app.inject({ method: "POST", url: "/api/v1/pipgm/items/hymn", payload: { title: "Kiitos", hymnNumber: "lv3", rawText: "a\nb\n\nc" } });
+    assert.equal(made.json().hymn.hymnNumber, "LV 3");
+    assert.equal(made.json().steps.length, 2); // one step per stanza
+    await app.inject({ method: "POST", url: "/api/v1/pipgm/items/hymn", payload: { title: "Hoosianna", hymnNumber: "1", rawText: "x" } });
+    const lv = (await app.inject({ method: "GET", url: "/api/v1/pipgm/items?hymnal=LV" })).json();
+    assert.equal(lv.total, 1);
+    assert.deepEqual(lv.hymnals, [{ prefix: "LV", count: 1 }, { prefix: "VK", count: 1 }]);
+    assert.equal((await app.inject({ method: "GET", url: "/api/v1/pipgm/items?hymnal=1" })).statusCode, 422);
+    assert.equal((await app.inject({ method: "GET", url: "/api/v1/pipgm/hymnals" })).json().hymnals.length, 2);
+  } finally {
+    await app.close();
+  }
+});

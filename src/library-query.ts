@@ -7,6 +7,7 @@
  */
 
 import type { PiPgmItem, PiPgmItemKind } from "./pipgm-model.js";
+import { hymnalPrefixOf } from "./hymnals.js";
 import { DEFAULT_TIMEZONE, UseAtError, useAtIntervals } from "./use-at.js";
 
 /** Types the UI offers first. Any other name that passes isLibraryType is allowed (an item can be tagged "prayer"). */
@@ -45,6 +46,8 @@ export interface LibraryQuery {
   /** One or more types; an item matches any of them. */
   types?: string[];
   kinds?: PiPgmItemKind[];
+  /** Hymnal prefixes (VK, LV, ...): only hymn items of those books. A hymn number without a prefix is VK. */
+  hymnals?: string[];
   /** Words that must all appear in the title (case-insensitive). */
   text?: string;
   /** Items meant to be used at some time inside [usedFrom, usedTo] (YYYY-MM-DD, either end may be left out). */
@@ -64,6 +67,13 @@ export interface LibraryPage {
   total: number;
   /** The matches per type (counted before the type filter, after every other filter), so a UI can show the chips. */
   types: Array<{ type: string; count: number }>;
+  /** The hymn items per hymnal prefix (counted before the hymnal filter, after every other filter), for filter chips. */
+  hymnals: Array<{ prefix: string; count: number }>;
+}
+
+/** The hymnal prefix of an item, or undefined when it is not a hymn item. */
+export function hymnalOf(item: PiPgmItem): string | undefined {
+  return item.kind === "hymn" ? hymnalPrefixOf(item.hymn?.hymnNumber) : undefined;
 }
 
 export const MAX_LIBRARY_PAGE = 500;
@@ -108,7 +118,16 @@ export function queryLibrary(all: PiPgmItem[], query: LibraryQuery = {}): Librar
   for (const item of beforeType) counts.set(libraryTypeOf(item), (counts.get(libraryTypeOf(item)) ?? 0) + 1);
   const types = [...counts.entries()].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
 
-  const matches = wanted ? beforeType.filter((item) => wanted.has(libraryTypeOf(item))) : beforeType;
+  const hymnalCounts = new Map<string, number>();
+  for (const item of beforeType) {
+    const prefix = hymnalOf(item);
+    if (prefix) hymnalCounts.set(prefix, (hymnalCounts.get(prefix) ?? 0) + 1);
+  }
+  const hymnals = [...hymnalCounts.entries()].map(([prefix, count]) => ({ prefix, count })).sort((a, b) => a.prefix.localeCompare(b.prefix));
+  const wantedHymnals = query.hymnals?.length ? new Set(query.hymnals.map((h) => h.toUpperCase())) : undefined;
+
+  const byType = wanted ? beforeType.filter((item) => wanted.has(libraryTypeOf(item))) : beforeType;
+  const matches = wantedHymnals ? byType.filter((item) => wantedHymnals.has(hymnalOf(item) ?? "")) : byType;
   const byNewest = (a: PiPgmItem, b: PiPgmItem): number => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id);
   const sort = query.sort ?? "newest";
   matches.sort(
@@ -123,5 +142,5 @@ export function queryLibrary(all: PiPgmItem[], query: LibraryQuery = {}): Librar
 
   const offset = Math.max(0, Math.floor(query.offset ?? 0));
   const limit = query.limit === undefined ? matches.length : Math.min(MAX_LIBRARY_PAGE, Math.max(1, Math.floor(query.limit)));
-  return { items: matches.slice(offset, offset + limit), total: matches.length, types };
+  return { items: matches.slice(offset, offset + limit), total: matches.length, types, hymnals };
 }

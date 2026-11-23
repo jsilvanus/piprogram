@@ -1,3 +1,4 @@
+import { formatHymnNumber, sameHymnNumber } from "./hymnals.js";
 import { AudioUploadError, type AudioNormaliser } from "./audio-upload.js";
 import { normalizeLibraryType } from "./library-query.js";
 import { DEFAULT_TIMEZONE, parseUseAt, UseAtError, useAtIntervals } from "./use-at.js";
@@ -1392,7 +1393,7 @@ export class PiPgmService {
     }
     if (entry.hymn) {
       const number = String(entry.hymn.number).trim();
-      const found = newest(all.filter((i) => i.kind === "hymn" && i.hymn?.hymnNumber.trim() === number));
+      const found = newest(all.filter((i) => i.kind === "hymn" && sameHymnNumber(i.hymn?.hymnNumber, number)));
       if (found) return { item: found, by: "hymnNumber" };
     }
     return null;
@@ -1546,7 +1547,7 @@ export class PiPgmService {
 
   createHymnItem(input: CreateHymnItemInput): PiPgmItem {
     const id = this.nextId("hymn");
-    const hymnNumber = input.hymnNumber?.trim() || "";
+    const hymnNumber = formatHymnNumber(input.hymnNumber);
     const title = input.title.trim();
     const includeTitleSlide = input.includeTitleSlide ?? false;
 
