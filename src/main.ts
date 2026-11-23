@@ -1,3 +1,4 @@
+import { parseHymnals } from "./hymnals.js";
 import { join } from "node:path";
 import { LibraryPersistence, PiStorageBlobStore } from "./library-store.js";
 import { buildPipgmServer } from "./server.js";
@@ -57,6 +58,8 @@ async function main(): Promise<void> {
     ...(libraryStore ? { libraryStore } : {}),
     ...(blobStore ? { stepStore: blobStore, playlistStore: blobStore } : {}),
     apiKey,
+    // PIPGM_HYMNALS: "VK=Virsikirja,LV=Lasten virsi" or a JSON array of {prefix, name}.
+    hymnals: parseHymnals(process.env.PIPGM_HYMNALS),
     logger: true,
     // Uploaded audio of any format is converted with ffmpeg (PIPGM_AUDIO_CONVERT=off keeps files as sent).
     ...(process.env.PIPGM_AUDIO_CONVERT?.trim().toLowerCase() === "off"

@@ -25,6 +25,7 @@ import { CanvaPackages, imageTypeOf, numberPages } from "./canva-package.js";
 import { StepImages, ffmpegRenderCustomVariant, ffmpegThumbnailer, isSupportedImageBuffer, variantResolution, type StepVariant, type Thumbnailer, type VariantRenderOptions } from "./step-cache.js";
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
 import { ActiveFolderStore } from "./active-folder.js";
+import { HYMNAL_PREFIX, DEFAULT_HYMNALS, type Hymnal } from "./hymnals.js";
 import { queryLibrary, normalizeLibraryType, libraryTypeOf, STANDARD_LIBRARY_TYPES, type LibraryQuery } from "./library-query.js";
 import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
 import type { EncoderSelector } from "./encoder.js";
@@ -33,6 +34,8 @@ import type { AudioToPcm } from "./feed-audio.js";
 import { AUDIO_LEVEL_NAMES, isAudioLevelName } from "./audio-levels.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
+  /** The known hymnals (prefix and name); default VK and LV. A hymn number may carry any prefix, known or not. */
+  hymnals?: Hymnal[] | undefined;
   /** How often an unloaded library or unsaved items are retried against the store (default 60 s). */
   libraryRetryMs?: number | undefined;
   /**
@@ -247,6 +250,14 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       message: "Valid API key required"
     });
   });
+
+  const configuredHymnals: Hymnal[] = options.hymnals?.length ? options.hymnals : DEFAULT_HYMNALS.map((h) => ({ ...h }));
+  /** The configured hymnals plus any other prefix found in the library, named by the prefix. */
+  const hymnalList = (found: string[] = []): Hymnal[] => [
+    ...configuredHymnals,
+    ...found.filter((p) => !configuredHymnals.some((h) => h.prefix === p)).map((prefix) => ({ prefix, name: prefix }))
+  ];
+  app.get("/api/v1/pipgm/hymnals", async () => ({ hymnals: configuredHymnals }));
 
   app.get("/health", async () => ({ status: "ok", service: "piprogram" }));
 
@@ -1103,6 +1114,9 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     const types = list(q.type);
     if (types.some((t) => !normalizeLibraryType(t))) return invalid(reply, "INVALID_TYPE", "type must be lowercase letters, digits and dashes");
     if (types.length) query.types = types;
+    const hymnals = (q.hymnal ?? "").split(",").map((x) => x.trim().toUpperCase()).filter(Boolean);
+    if (hymnals.some((h) => !HYMNAL_PREFIX.test(h))) return invalid(reply, "INVALID_HYMNAL", "hymnal must be 1-6 letters, e.g. VK or LV");
+    if (hymnals.length) query.hymnals = hymnals;
     const kinds = list(q.kind);
     if (kinds.length) query.kinds = kinds as LibraryQuery["kinds"] & string[];
     if (q.q) query.text = q.q;
@@ -1121,7 +1135,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     }
     try {
       const page = queryLibrary(service.listLibraryItems(), query);
-      return { ...page, standardTypes: STANDARD_LIBRARY_TYPES };
+      return { ...page, standardTypes: STANDARD_LIBRARY_TYPES, hymnalList: hymnalList(page.hymnals.map((h) => h.prefix)) };
     } catch (error) {
       if (error instanceof UseAtError) return invalid(reply, "INVALID_DATE", error.message);
       throw error;

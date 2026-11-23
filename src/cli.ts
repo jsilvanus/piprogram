@@ -369,7 +369,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     }
     if (group === "items" && action === "list") {
       const sort = flag(rest, "--sort") as "newest" | "oldest" | "title" | "used" | undefined;
-      const data = await ItemsService.listItems(flag(rest, "--type"), undefined, flag(rest, "--q"), flag(rest, "--from"), flag(rest, "--to"), rest.includes("--unscheduled") ? true : undefined, sort);
+      const data = await ItemsService.listItems(flag(rest, "--type"), undefined, flag(rest, "--q"), flag(rest, "--from"), flag(rest, "--to"), rest.includes("--unscheduled") ? true : undefined, sort, undefined, undefined, flag(rest, "--hymnal"));
       for (const item of data.items) io.out(JSON.stringify(item));
       io.err(`${data.total} item(s); types: ${data.types.map((t) => `${t.type} ${t.count}`).join(", ") || "none"}`);
       return 0;

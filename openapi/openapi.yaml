@@ -917,6 +917,7 @@ paths:
         - {in: query, name: sort, schema: {type: string, enum: [newest, oldest, title, used]}}
         - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 500}}
         - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+        - {in: query, name: hymnal, schema: {type: string}, description: "Comma-separated hymnal prefixes (VK, LV, ...): only hymn items of those books. A hymn number without a prefix is VK."}
       responses:
         "200":
           description: Library items
@@ -944,8 +945,48 @@ paths:
                   standardTypes:
                     type: array
                     items: {type: string}
+                  hymnals:
+                    type: array
+                    description: Hymn items per hymnal prefix (counted before the hymnal filter), for filter chips
+                    items:
+                      type: object
+                      required: [prefix, count]
+                      properties:
+                        prefix: {type: string}
+                        count: {type: integer}
+                  hymnalList:
+                    type: array
+                    description: The configured hymnals plus any other prefix found in the library
+                    items:
+                      type: object
+                      required: [prefix, name]
+                      properties:
+                        prefix: {type: string}
+                        name: {type: string}
         "422":
           $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/hymnals:
+    get:
+      operationId: listHymnals
+      tags: [Items]
+      summary: The configured hymnals (PIPGM_HYMNALS), prefix and name
+      responses:
+        "200":
+          description: Hymnals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hymnals]
+                properties:
+                  hymnals:
+                    type: array
+                    items:
+                      type: object
+                      required: [prefix, name]
+                      properties:
+                        prefix: {type: string}
+                        name: {type: string}
   /api/v1/pipgm/items/{itemId}:
     get:
       operationId: getItem
@@ -1296,6 +1337,9 @@ paths:
                   type: string
                 hymnNumber:
                   type: string
+                  description: >
+                    May carry a hymnal prefix: "123" or "VK 123" is the Virsikirja, "LV 12" is Lasten virsi. Stored as
+                    "LV 12" (prefix, space, number); no prefix stays a plain number.
                 includeTitleSlide:
                   type: boolean
                 stanzas:
