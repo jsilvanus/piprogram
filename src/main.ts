@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { LibraryPersistence, PiStorageBlobStore } from "./library-store.js";
 import { buildPipgmServer } from "./server.js";
+import { ffmpegAudioNormaliser } from "./audio-upload.js";
 import { createEncoderSelector, type EncoderSetting } from "./encoder.js";
 
 /** Starts the PiPGM HTTP API. Reads PIPGM_PORT (default 3200), PIPGM_HOST (default 127.0.0.1) and PIPGM_API_KEY. */
@@ -57,6 +58,10 @@ async function main(): Promise<void> {
     ...(blobStore ? { stepStore: blobStore, playlistStore: blobStore } : {}),
     apiKey,
     logger: true,
+    // Uploaded audio of any format is converted with ffmpeg (PIPGM_AUDIO_CONVERT=off keeps files as sent).
+    ...(process.env.PIPGM_AUDIO_CONVERT?.trim().toLowerCase() === "off"
+      ? {}
+      : { audioNormaliser: ffmpegAudioNormaliser({ ffmpeg: ffmpegBin ?? "ffmpeg", ffprobe: process.env.PIPGM_FFPROBE?.trim() || "ffprobe" }) }),
     cacheDir,
     ...(rtspBase && encoderSelector
       ? {

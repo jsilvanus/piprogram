@@ -11,7 +11,7 @@ import { UseAtError } from "./use-at.js";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { MAX_AUDIO_ARM_SECONDS, PiPgmService, type PiPgmServiceOptions } from "./pipgm-service.js";
+import { LIBRARY_ZONE, MAX_AUDIO_ARM_SECONDS, PiPgmService, type PiPgmServiceOptions } from "./pipgm-service.js";
 import type {
   PiPgmAsset,
   PiPgmControlAction,
@@ -24,6 +24,8 @@ import { createChromiumFrameRenderer, FrameRendererUnavailableError, type PipgmF
 import { CanvaPackages, imageTypeOf, numberPages } from "./canva-package.js";
 import { StepImages, ffmpegRenderCustomVariant, ffmpegThumbnailer, isSupportedImageBuffer, variantResolution, type StepVariant, type Thumbnailer, type VariantRenderOptions } from "./step-cache.js";
 import { MemoryBlobStore, type BlobStore } from "./library-store.js";
+import { ActiveFolderStore } from "./active-folder.js";
+import { queryLibrary, normalizeLibraryType, libraryTypeOf, STANDARD_LIBRARY_TYPES, type LibraryQuery } from "./library-query.js";
 import { PlaylistStore, isPlaylistId, savedItemOf, validatePlaylist } from "./playlist-store.js";
 import type { EncoderSelector } from "./encoder.js";
 import { PipgmFeeders, type FeedInput, type FeederEncoder, type PngToRaw, type SpawnFeeder } from "./feeder.js";
@@ -260,6 +262,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
   service.setStepImages(steps);
 
   const playlists = new PlaylistStore(options.playlistStore ?? new MemoryBlobStore());
+  const active = new ActiveFolderStore(options.playlistStore ?? new MemoryBlobStore());
   const storageDown = (reply: FastifyReply, error: unknown) =>
     reply.code(503).send({
       error: { code: "STORAGE_UNAVAILABLE", message: `The playlist store is not reachable: ${error instanceof Error ? error.message : String(error)}` }
@@ -1091,7 +1094,153 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   // ---- Library items -------------------------------------------------------
 
-  app.get("/api/v1/pipgm/items", async () => ({ items: service.listLibraryItems() }));
+  // The library, filtered: ?type=sound,tts&kind=audio&q=words&usedFrom=2026-11-01&usedTo=2026-11-30&unscheduled=true
+  // &sort=newest|oldest|title|used&limit=50&offset=0. Without a query it lists everything, as before.
+  app.get<{ Querystring: Record<string, string | undefined> }>("/api/v1/pipgm/items", async (request, reply) => {
+    const q = request.query ?? {};
+    const list = (v: string | undefined): string[] => (v ?? "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+    const query: LibraryQuery = { zone: LIBRARY_ZONE };
+    const types = list(q.type);
+    if (types.some((t) => !normalizeLibraryType(t))) return invalid(reply, "INVALID_TYPE", "type must be lowercase letters, digits and dashes");
+    if (types.length) query.types = types;
+    const kinds = list(q.kind);
+    if (kinds.length) query.kinds = kinds as LibraryQuery["kinds"] & string[];
+    if (q.q) query.text = q.q;
+    if (q.usedFrom) query.usedFrom = q.usedFrom;
+    if (q.usedTo) query.usedTo = q.usedTo;
+    if (q.unscheduled === "true" || q.unscheduled === "false") query.unscheduled = q.unscheduled === "true";
+    if (q.sort !== undefined) {
+      if (q.sort !== "newest" && q.sort !== "oldest" && q.sort !== "title" && q.sort !== "used") return invalid(reply, "INVALID_SORT", "sort must be newest, oldest, title or used");
+      query.sort = q.sort;
+    }
+    for (const name of ["limit", "offset"] as const) {
+      if (q[name] === undefined) continue;
+      const n = Number(q[name]);
+      if (!Number.isInteger(n) || n < (name === "limit" ? 1 : 0)) return invalid(reply, `INVALID_${name.toUpperCase()}`, `${name} must be a whole number`);
+      query[name] = n;
+    }
+    try {
+      const page = queryLibrary(service.listLibraryItems(), query);
+      return { ...page, standardTypes: STANDARD_LIBRARY_TYPES };
+    } catch (error) {
+      if (error instanceof UseAtError) return invalid(reply, "INVALID_DATE", error.message);
+      throw error;
+    }
+  });
+
+  // Rename an item and/or set its library type (type null = back to the default of its kind).
+  app.patch<{ Params: { itemId: string }; Body: { title?: unknown; type?: unknown } }>("/api/v1/pipgm/items/:itemId", async (request, reply) => {
+    const body = request.body ?? {};
+    if (body.title !== undefined && typeof body.title !== "string") return invalid(reply, "INVALID_TITLE", "title must be a string");
+    if (body.type !== undefined && body.type !== null && typeof body.type !== "string") return invalid(reply, "INVALID_TYPE", "type must be a string or null");
+    if (body.title === undefined && body.type === undefined) return invalid(reply, "NOTHING_TO_CHANGE", "give title and/or type");
+    const result = service.updateItem(request.params.itemId, {
+      ...(body.title !== undefined ? { title: body.title as string } : {}),
+      ...(body.type !== undefined ? { type: body.type as string | null } : {})
+    });
+    if (result === "ITEM_NOT_FOUND") {
+      return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+    }
+    if (result === "INVALID_TYPE") return invalid(reply, "INVALID_TYPE", "type must be lowercase letters, digits and dashes (at most 32)");
+    if (result === "INVALID_TITLE") return invalid(reply, "INVALID_TITLE", "title must be 1-200 characters");
+    return result;
+  });
+
+  // ---- Active folder: hand-picked items plus the items whose useAt covers the day -----------------
+  const activeView = async (date: string) => {
+    const byDate = service.itemsForDate(date, { includeAudio: true });
+    const manual = await active.list();
+    const dateIds = new Set(byDate.map((i) => i.id));
+    const manualIds = new Set(manual.map((e) => e.itemId));
+    const items = byDate.map((item) => ({ item, reason: manualIds.has(item.id) ? "both" : "date" }));
+    for (const entry of manual) {
+      const item = service.getLibraryItem(entry.itemId);
+      if (item && !dateIds.has(item.id)) items.push({ item, reason: "manual" });
+    }
+    return { date, items, dateCount: byDate.length, manualCount: manual.length };
+  };
+  const dateOf = (value: unknown): string | null =>
+    value === undefined ? service.todayInZone() : typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+
+  app.get<{ Querystring: { date?: string } }>("/api/v1/pipgm/library/active", async (request, reply) => {
+    const date = dateOf(request.query?.date);
+    if (!date) return invalid(reply, "INVALID_DATE", "date must be YYYY-MM-DD");
+    try {
+      return await activeView(date);
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  app.put<{ Params: { itemId: string } }>("/api/v1/pipgm/library/active/:itemId", async (request, reply) => {
+    if (!service.getLibraryItem(request.params.itemId)) {
+      return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+    }
+    try {
+      if (!(await active.add(request.params.itemId))) return reply.code(409).send({ error: { code: "ACTIVE_FULL", message: "The active folder is full" } });
+      return reply.code(200).send(await activeView(service.todayInZone()));
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  app.delete<{ Params: { itemId: string } }>("/api/v1/pipgm/library/active/:itemId", async (request, reply) => {
+    try {
+      await active.remove(request.params.itemId);
+      return reply.code(200).send(await activeView(service.todayInZone()));
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  // Empties the hand-picked list (items chosen by date stay: change their dates to remove them).
+  app.delete("/api/v1/pipgm/library/active", async (_request, reply) => {
+    try {
+      const removed = await active.clear();
+      return reply.code(200).send({ removed, ...(await activeView(service.todayInZone())) });
+    } catch (error) {
+      return storageDown(reply, error);
+    }
+  });
+
+  // Saves a playlist from the active folder. Sound items are left out (they play through audio/play, not the
+  // playlist) unless includeAudio is true. itemIds picks and orders a subset of the folder.
+  app.post<{ Body: { name?: unknown; date?: unknown; orientation?: unknown; itemIds?: unknown; includeAudio?: unknown } }>(
+    "/api/v1/pipgm/library/active/playlist",
+    async (request, reply) => {
+      const body = request.body ?? {};
+      const date = dateOf(body.date);
+      if (!date) return invalid(reply, "INVALID_DATE", "date must be YYYY-MM-DD");
+      if (typeof body.name !== "string" || !body.name.trim()) return invalid(reply, "NAME_REQUIRED", "name is required");
+      if (body.orientation !== undefined && body.orientation !== "landscape" && body.orientation !== "portrait") {
+        return invalid(reply, "INVALID_ORIENTATION", "orientation must be landscape or portrait");
+      }
+      if (body.itemIds !== undefined && !(Array.isArray(body.itemIds) && body.itemIds.every((v) => typeof v === "string"))) {
+        return invalid(reply, "INVALID_ITEM_IDS", "itemIds must be a list of item ids");
+      }
+      try {
+        const view = await activeView(date);
+        let chosen = view.items.map((e) => e.item);
+        if (body.itemIds) {
+          const byId = new Map(chosen.map((i) => [i.id, i]));
+          const unknown = (body.itemIds as string[]).filter((id) => !byId.has(id));
+          if (unknown.length) return reply.code(422).send({ error: { code: "NOT_IN_ACTIVE_FOLDER", message: `Not in the active folder: ${unknown.join(", ")}` } });
+          chosen = (body.itemIds as string[]).map((id) => byId.get(id)!);
+        }
+        const skippedAudio = body.includeAudio === true ? 0 : chosen.filter((i) => i.kind === "audio").length;
+        if (body.includeAudio !== true) chosen = chosen.filter((i) => i.kind !== "audio");
+        const saved = await playlists.save({
+          schema: "piprogram.playlist/1",
+          name: body.name.trim().slice(0, 120),
+          ...(body.orientation ? { orientation: body.orientation as "landscape" | "portrait" } : {}),
+          items: chosen.map(savedItemOf)
+        });
+        return reply.code(201).send({ playlist: saved, skippedAudio });
+      } catch (error) {
+        return storageDown(reply, error);
+      }
+    }
+  );
 
   app.get<{ Params: { itemId: string } }>("/api/v1/pipgm/items/:itemId", async (request, reply) => {
     const item = service.getLibraryItem(request.params.itemId);
@@ -1108,6 +1257,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       includeTitleSlide?: unknown;
       stanzas?: unknown;
       rawText?: unknown;
+      type?: unknown;
       targetPipelineId?: unknown;
       cueImmediately?: unknown;
     };
@@ -1126,6 +1276,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         ? { stanzas: body.stanzas as Array<{ stanzaNumber?: string | number; lines: string[]; refrain?: boolean }> }
         : {}),
       ...(typeof body.rawText === "string" ? { rawText: body.rawText } : {}),
+      ...(typeof body.type === "string" ? { type: body.type } : {}),
       ...(typeof body.targetPipelineId === "string" ? { targetPipelineId: body.targetPipelineId as PiPgmPipelineId } : {}),
       ...(typeof body.cueImmediately === "boolean" ? { cueImmediately: body.cueImmediately } : {})
     });
@@ -1179,6 +1330,9 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       loop?: unknown;
       targetPipelineId?: unknown;
       cueImmediately?: unknown;
+      type?: unknown;
+      useAt?: unknown;
+      recorded?: unknown;
     };
   }>("/api/v1/pipgm/items/media", async (request, reply) => {
     const body = request.body ?? {};
@@ -1190,36 +1344,42 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     if (body.targetPipelineId !== undefined && !isPipelineId(service, body.targetPipelineId)) {
       return invalid(reply, "INVALID_PIPELINE_ID", "targetPipelineId must be PiPGM1, PiPGM2, or PiPGM3");
     }
-    let checkedDurationMs: number | undefined;
+    if (body.type !== undefined && !normalizeLibraryType(body.type)) {
+      return invalid(reply, "INVALID_TYPE", "type must be lowercase letters, digits and dashes (at most 32)");
+    }
+    let stored = { filename, mimeType: typeof body.mimeType === "string" ? body.mimeType : undefined, dataBase64: typeof body.dataBase64 === "string" ? body.dataBase64 : undefined, durationMs: undefined as number | undefined };
     if (body.kind === "audio") {
       const audio = Buffer.from(typeof body.dataBase64 === "string" ? body.dataBase64 : "", "base64");
-      const mime = typeof body.mimeType === "string" ? body.mimeType : "";
-      const checked = service.checkAudioUpload(audio, mime, filename);
-      if (!checked.ok) {
-        return reply.code(checked.code === "AUDIO_TOO_LARGE" ? 413 : 422).send({
-          error: { code: checked.code, message: checked.message }
-        });
+      // Any audio format is accepted: ffmpeg converts it (src/audio-upload.ts) unless it is a valid PCM WAV.
+      const prepared = await service.prepareAudioUpload(audio, typeof body.mimeType === "string" ? body.mimeType : "", filename);
+      if (!prepared.ok) {
+        return reply.code(prepared.status).send({ error: { code: prepared.code, message: prepared.message } });
       }
-      checkedDurationMs = checked.durationMs;
+      stored = { filename: prepared.filename, mimeType: prepared.mimeType, dataBase64: prepared.data.toString("base64"), durationMs: prepared.durationMs };
     }
-    const item = service.createUploadedMediaItem({
-      kind: body.kind,
-      filename,
-      ...(typeof body.title === "string" ? { title: body.title } : {}),
-      ...(typeof body.mimeType === "string" ? { mimeType: body.mimeType } : {}),
-      ...(typeof body.dataBase64 === "string" ? { dataBase64: body.dataBase64 } : {}),
-      ...(body.fit === "contain" || body.fit === "cover" ? { fit: body.fit } : {}),
-      ...(typeof body.caption === "string" ? { caption: body.caption } : {}),
-      ...(checkedDurationMs !== undefined
-        ? { durationMs: checkedDurationMs }
-        : typeof body.durationMs === "number"
-          ? { durationMs: body.durationMs }
-          : {}),
-      ...(typeof body.autoplay === "boolean" ? { autoplay: body.autoplay } : {}),
-      ...(typeof body.loop === "boolean" ? { loop: body.loop } : {}),
-      ...(typeof body.targetPipelineId === "string" ? { targetPipelineId: body.targetPipelineId as PiPgmPipelineId } : {}),
-      ...(typeof body.cueImmediately === "boolean" ? { cueImmediately: body.cueImmediately } : {})
-    });
+    let item;
+    try {
+      item = service.createUploadedMediaItem({
+        kind: body.kind,
+        filename: stored.filename,
+        ...(typeof body.title === "string" ? { title: body.title } : {}),
+        ...(stored.mimeType !== undefined ? { mimeType: stored.mimeType } : {}),
+        ...(stored.dataBase64 !== undefined ? { dataBase64: stored.dataBase64 } : {}),
+        ...(body.fit === "contain" || body.fit === "cover" ? { fit: body.fit } : {}),
+        ...(typeof body.caption === "string" ? { caption: body.caption } : {}),
+        ...(stored.durationMs !== undefined ? { durationMs: stored.durationMs } : typeof body.durationMs === "number" ? { durationMs: body.durationMs } : {}),
+        ...(typeof body.autoplay === "boolean" ? { autoplay: body.autoplay } : {}),
+        ...(typeof body.loop === "boolean" ? { loop: body.loop } : {}),
+        ...(typeof body.targetPipelineId === "string" ? { targetPipelineId: body.targetPipelineId as PiPgmPipelineId } : {}),
+        ...(typeof body.cueImmediately === "boolean" ? { cueImmediately: body.cueImmediately } : {}),
+        ...(typeof body.type === "string" ? { type: body.type } : {}),
+        ...(typeof body.useAt === "string" || (Array.isArray(body.useAt) && body.useAt.every((v) => typeof v === "string")) ? { useAt: body.useAt as string | string[] } : {}),
+        ...(body.recorded === true ? { origin: "recording" as const } : {})
+      });
+    } catch (error) {
+      if (error instanceof UseAtError) return invalid(reply, "INVALID_USE_AT", error.message);
+      throw error;
+    }
     return reply.code(201).send(item);
   });
 

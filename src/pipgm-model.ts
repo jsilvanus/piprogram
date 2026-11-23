@@ -167,6 +167,8 @@ export interface AudioItemData {
   assetUrl: string;
   durationMs?: number;
   loop: boolean;
+  /** How the file came to the library: a file upload, a recording made in the browser, or prepared speech. */
+  origin?: "upload" | "recording" | "tts";
 }
 
 export interface HymnStanza {
@@ -211,6 +213,11 @@ export interface PiPgmItem {
   audio?: AudioItemData;
   /** When the item is meant to be used (see use-at.ts): days, hours, moments, ranges. */
   useAt?: string[];
+  /**
+   * The library type the user filters by (src/library-query.ts): a short lowercase name such as sound, tts, hymn,
+   * song, jingle. Not set = the default for the item's kind.
+   */
+  type?: string;
 }
 
 export type PiPgmMobileSignCode =
