@@ -9,6 +9,7 @@ tags:
   - name: System
   - name: Pipelines
   - name: Items
+  - name: Library
 paths:
   /health:
     get:
@@ -901,6 +902,21 @@ paths:
     get:
       operationId: listItems
       tags: [Items]
+      summary: The library, optionally filtered by type, text and use dates
+      description: >
+        Without a query every item is returned. `type` is the library type (sound, tts, hymn, song, image, video, slides,
+        canva or any name an item was tagged with); `types` in the answer counts the matches per type (before the type
+        filter) for filter chips. `usedFrom`/`usedTo` match items whose useAt overlaps the range.
+      parameters:
+        - {in: query, name: type, schema: {type: string}, description: Comma-separated library types}
+        - {in: query, name: kind, schema: {type: string}, description: Comma-separated kinds (audio, hymn, image, ...)}
+        - {in: query, name: q, schema: {type: string}, description: Words that must all be in the title}
+        - {in: query, name: usedFrom, schema: {type: string}, description: YYYY-MM-DD}
+        - {in: query, name: usedTo, schema: {type: string}, description: YYYY-MM-DD}
+        - {in: query, name: unscheduled, schema: {type: boolean}, description: true = only items without a useAt}
+        - {in: query, name: sort, schema: {type: string, enum: [newest, oldest, title, used]}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 500}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
       responses:
         "200":
           description: Library items
@@ -908,12 +924,28 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items]
+                required: [items, total, types, standardTypes]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/Item"
+                  total:
+                    type: integer
+                    description: Matches before limit and offset
+                  types:
+                    type: array
+                    items:
+                      type: object
+                      required: [type, count]
+                      properties:
+                        type: {type: string}
+                        count: {type: integer}
+                  standardTypes:
+                    type: array
+                    items: {type: string}
+        "422":
+          $ref: "#/components/responses/Invalid"
   /api/v1/pipgm/items/{itemId}:
     get:
       operationId: getItem
@@ -933,6 +965,36 @@ paths:
                 $ref: "#/components/schemas/Item"
         "404":
           $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateItem
+      tags: [Items]
+      summary: Rename an item and/or set its library type (type null = the default of its kind)
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: {type: string}
+                type: {type: string, nullable: true, description: "Lowercase letters, digits and dashes, at most 32"}
+      responses:
+        "200":
+          description: The updated item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Invalid"
     delete:
       operationId: deleteItem
       tags: [Items]
@@ -1304,6 +1366,87 @@ paths:
                 $ref: "#/components/schemas/Item"
         "422":
           $ref: "#/components/responses/Invalid"
+  /api/v1/pipgm/library/active:
+    get:
+      operationId: getActiveFolder
+      tags: [Library]
+      summary: The active folder for a day
+      description: >
+        The items whose useAt covers the day (reason date) together with the items added by hand (reason manual; both
+        when both apply). The day defaults to today in PIPGM_TIMEZONE.
+      parameters:
+        - {in: query, name: date, schema: {type: string}, description: YYYY-MM-DD}
+      responses:
+        "200":
+          $ref: "#/components/responses/ActiveFolder"
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    delete:
+      operationId: clearActiveFolder
+      tags: [Library]
+      summary: Remove every hand-picked item from the active folder (items chosen by date stay)
+      responses:
+        "200":
+          description: Number removed, and the folder as it is now
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /api/v1/pipgm/library/active/{itemId}:
+    put:
+      operationId: addToActiveFolder
+      tags: [Library]
+      summary: Add an item to the active folder by hand
+      parameters:
+        - {in: path, name: itemId, required: true, schema: {type: string}}
+      responses:
+        "200":
+          $ref: "#/components/responses/ActiveFolder"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The active folder is full
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    delete:
+      operationId: removeFromActiveFolder
+      tags: [Library]
+      summary: Remove a hand-picked item from the active folder
+      parameters:
+        - {in: path, name: itemId, required: true, schema: {type: string}}
+      responses:
+        "200":
+          $ref: "#/components/responses/ActiveFolder"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /api/v1/pipgm/library/active/playlist:
+    post:
+      operationId: createPlaylistFromActiveFolder
+      tags: [Library]
+      summary: Save a playlist from the active folder
+      description: >
+        Sound items are left out (they play through audio/play) unless includeAudio is true; `skippedAudio` says how many.
+        itemIds picks and orders a subset of the folder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                date: {type: string, description: YYYY-MM-DD, default today}
+                orientation: {type: string, enum: [landscape, portrait]}
+                itemIds: {type: array, items: {type: string}}
+                includeAudio: {type: boolean}
+      responses:
+        "201":
+          description: The saved playlist
+        "422":
+          $ref: "#/components/responses/Invalid"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
   /api/v1/pipgm/items/media:
     post:
       operationId: createMediaItem
@@ -1343,9 +1486,19 @@ paths:
                   $ref: "#/components/schemas/PipgmPipelineId"
                 cueImmediately:
                   type: boolean
+                type:
+                  type: string
+                  description: Library type (sound, jingle, song, ...); default by kind
+                useAt:
+                  description: When the item is meant to be used (days, hours, ranges), a string or a list
+                recorded:
+                  type: boolean
+                  description: The audio was recorded in the browser (item.audio.origin = recording)
       responses:
         "201":
-          description: Created media item
+          description: >
+            Created media item. Audio of any format is accepted: it is converted to mp3 (a valid PCM WAV is kept) and
+            its length is read; 422 AUDIO_UNREADABLE / AUDIO_TOO_LONG, 413 AUDIO_TOO_LARGE.
           content:
             application/json:
               schema:
@@ -1439,6 +1592,28 @@ components:
       schema:
         $ref: "#/components/schemas/PipgmPipelineId"
   responses:
+    ActiveFolder:
+      description: The active folder for a day
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [date, items, dateCount, manualCount]
+            properties:
+              date: {type: string}
+              items:
+                type: array
+                items:
+                  type: object
+                  required: [item, reason]
+                  properties:
+                    item:
+                      $ref: "#/components/schemas/Item"
+                    reason:
+                      type: string
+                      enum: [date, manual, both]
+              dateCount: {type: integer}
+              manualCount: {type: integer}
     StorageUnavailable:
       description: The playlist store (pistorage) is not reachable
       content:

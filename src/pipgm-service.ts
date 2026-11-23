@@ -1,3 +1,5 @@
+import { AudioUploadError, type AudioNormaliser } from "./audio-upload.js";
+import { normalizeLibraryType } from "./library-query.js";
 import { DEFAULT_TIMEZONE, parseUseAt, UseAtError, useAtIntervals } from "./use-at.js";
 import { PiSwitchClient, type SlideAdvanceResult } from "./piswitch-client.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
@@ -109,6 +111,8 @@ export interface CreateHymnItemInput {
   rawText?: string;
   targetPipelineId?: PiPgmPipelineId;
   cueImmediately?: boolean;
+  /** Library type: "hymn" (default) or "song" or another name (src/library-query.ts). */
+  type?: string;
 }
 
 export interface CreateYouTubeItemInput {
@@ -135,6 +139,12 @@ export interface CreateUploadedMediaItemInput {
   loop?: boolean;
   targetPipelineId?: PiPgmPipelineId;
   cueImmediately?: boolean;
+  /** Library type (src/library-query.ts); default by kind. */
+  type?: string;
+  /** When the item is meant to be used (use-at.ts). */
+  useAt?: string | string[];
+  /** How an audio file came: upload (default) or recording. */
+  origin?: "upload" | "recording";
 }
 
 export interface CreatePptxItemInput {
@@ -188,6 +198,8 @@ export interface PiPgmServiceOptions {
   canvaRetentionDays?: number | undefined;
   /** Largest audio file in bytes, for prepared WAVs and uploaded audio (default env PIPGM_AUDIO_MAX_BYTES or 20 MB). */
   audioMaxBytes?: number | undefined;
+  /** Converts uploaded audio of any format (default: none, files are stored as sent). */
+  audioNormaliser?: AudioNormaliser | undefined;
   /** Prepared phrases kept; the oldest is dropped beyond this (default env PIPGM_TTS_MAX_ITEMS or 50). */
   ttsMaxItems?: number | undefined;
   /** Total bytes of prepared phrases kept (default env PIPGM_TTS_MAX_TOTAL_BYTES or 100 MB). */
@@ -253,6 +265,8 @@ export type PlayAudioResult =
   | { ok: true; pipeline: PiPgmPipelineSnapshot }
   | { ok: false; code: "PIPELINE_NOT_FOUND" | "AUDIO_NOT_ARMED" | "ITEM_NOT_FOUND" | "ITEM_NOT_AUDIO" };
 
+export const LIBRARY_ZONE = USE_AT_ZONE;
+
 export class PiPgmService {
   private readonly pipelines = new Map<PiPgmPipelineId, PipelineInternalState>();
   private readonly library = new Map<string, PiPgmItem>();
@@ -264,6 +278,7 @@ export class PiPgmService {
   private readonly frameRenderer?: PipgmFrameRenderer | undefined;
   private stepImages?: StepImages | undefined;
   private readonly ttsEngine: TtsEngine | undefined;
+  private readonly audioNormaliser: AudioNormaliser | undefined;
   readonly ttsMaxChars: number;
   /** Highest volume any feed plays at (the gain cap). */
   get maxAudioVolume(): number {
@@ -305,6 +320,7 @@ export class PiPgmService {
     this.ttsMaxChars = Math.round(options.ttsMaxChars ?? positiveFromEnv("PIPGM_TTS_MAX_CHARS", 500));
     this.ttsMaxSeconds = options.ttsMaxSeconds ?? positiveFromEnv("PIPGM_TTS_MAX_SECONDS", 60);
     this.audioMaxBytes = Math.round(options.audioMaxBytes ?? positiveFromEnv("PIPGM_AUDIO_MAX_BYTES", 20 * 1024 * 1024));
+    this.audioNormaliser = options.audioNormaliser;
     this.ttsMaxItems = Math.round(options.ttsMaxItems ?? positiveFromEnv("PIPGM_TTS_MAX_ITEMS", 50));
     this.ttsMaxTotalBytes = Math.round(options.ttsMaxTotalBytes ?? positiveFromEnv("PIPGM_TTS_MAX_TOTAL_BYTES", 100 * 1024 * 1024));
     this.audioLevels = options.audioLevels ?? parseAudioLevels(process.env.PIPGM_AUDIO_LEVELS);
@@ -589,6 +605,58 @@ export class PiPgmService {
     // Once the item is in the store, only its date changes there; the page files are not sent again.
     this.persistItem(itemId, this.assetIdsOf(item), this.expiryOf(item), this.savedItems.has(itemId));
     return structuredClone(item);
+  }
+
+  /** Today's date (YYYY-MM-DD) in the configured time zone. */
+  todayInZone(): string {
+    return new Intl.DateTimeFormat("sv-SE", { timeZone: USE_AT_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(this.now()));
+  }
+
+  /** Renames an item and/or changes its library type (null clears the type back to the default). */
+  updateItem(itemId: string, patch: { title?: string; type?: string | null }): PiPgmItem | "ITEM_NOT_FOUND" | "INVALID_TYPE" | "INVALID_TITLE" {
+    const item = this.library.get(itemId);
+    if (!item) return "ITEM_NOT_FOUND";
+    let type: string | undefined;
+    if (typeof patch.type === "string") {
+      type = normalizeLibraryType(patch.type);
+      if (!type) return "INVALID_TYPE";
+    }
+    const title = patch.title?.trim();
+    if (patch.title !== undefined && (!title || title.length > 200)) return "INVALID_TITLE";
+    if (title) item.title = title;
+    if (type) item.type = type;
+    else if (patch.type === null) delete item.type;
+    // Only metadata changed: with the item already in the store, the bytes are not sent again.
+    this.persistItem(itemId, this.assetIdsOf(item), this.expiryOf(item), this.savedItems.has(itemId));
+    return structuredClone(item);
+  }
+
+  /**
+   * Prepares an uploaded audio file for storing: with a normaliser (ffmpeg) any format is converted to mp3 unless it is a
+   * valid PCM WAV; without one the file is checked as before and stored as sent.
+   */
+  async prepareAudioUpload(buffer: Buffer, mimeType: string, filename: string):
+    | Promise<
+        | { ok: true; data: Buffer; mimeType: string; filename: string; durationMs?: number }
+        | { ok: false; code: string; message: string; status: number }
+      > {
+    if (buffer.length === 0) return { ok: false, code: "AUDIO_EMPTY", message: "the file is empty", status: 422 };
+    const checked = this.checkAudioUpload(buffer, mimeType, filename);
+    if (!checked.ok && checked.code === "AUDIO_TOO_LARGE") return { ...checked, status: 413 };
+    if (checked.ok && checked.durationMs !== undefined) {
+      return { ok: true, data: buffer, mimeType: mimeType || "audio/wav", filename, durationMs: checked.durationMs };
+    }
+    if (!this.audioNormaliser) {
+      return checked.ok ? { ok: true, data: buffer, mimeType, filename } : { ...checked, status: 422 };
+    }
+    try {
+      const out = await this.audioNormaliser(buffer, { maxSeconds: this.ttsMaxSeconds });
+      const base = filename.replace(/\.[^./\\]*$/, "") || "audio";
+      return { ok: true, data: out.data, mimeType: out.mimeType, filename: `${base}.${out.extension}`, durationMs: out.durationMs };
+    } catch (error) {
+      if (error instanceof AudioUploadError) return { ok: false, code: error.code, message: error.message, status: error.code === "AUDIO_TOO_LONG" ? 422 : error.code === "AUDIO_UNREADABLE" ? 422 : 502 };
+      return { ok: false, code: "AUDIO_CONVERT_FAILED", message: error instanceof Error ? error.message : "conversion failed", status: 502 };
+    }
   }
 
   /** The retention deadline an item's files carry in the store (Canva pages only). */
@@ -980,7 +1048,8 @@ export class PiPgmService {
           assetUrl
         }
       ],
-      audio: { assetId, filename, mimeType: "audio/wav", assetUrl, durationMs: meta.durationMs, loop: false }
+      audio: { assetId, filename, mimeType: "audio/wav", assetUrl, durationMs: meta.durationMs, loop: false, origin: "tts" },
+      type: "tts"
     };
     this.library.set(itemId, item);
     this.prepared.set(meta.key, { itemId, assetId, bytes: meta.bytes, createdAt: meta.createdAt });
@@ -1281,14 +1350,14 @@ export class PiPgmService {
    * Canva, images, video, and last anything else (audio is left out: it plays through the audio route, not the
    * playlist). Within a group by the earliest time of the day, then by age. Changes nothing.
    */
-  itemsForDate(date: string): PiPgmItem[] {
+  itemsForDate(date: string, options: { includeAudio?: boolean } = {}): PiPgmItem[] {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new UseAtError(`date must be YYYY-MM-DD: ${date}`);
     const [day] = useAtIntervals([date], USE_AT_ZONE);
     if (!day) throw new UseAtError(`date must be YYYY-MM-DD: ${date}`);
-    const rank: Record<string, number> = { hymn: 0, pptx: 1, canva: 2, image: 3, video: 4, youtube: 4 };
+    const rank: Record<string, number> = { hymn: 0, pptx: 1, canva: 2, image: 3, video: 4, youtube: 4, audio: 6 };
     const hits: Array<{ item: PiPgmItem; from: number }> = [];
     for (const item of this.library.values()) {
-      if (item.kind === "audio" || !item.useAt?.length) continue;
+      if ((item.kind === "audio" && !options.includeAudio) || !item.useAt?.length) continue;
       const overlaps = useAtIntervals(item.useAt, USE_AT_ZONE).filter((i) => i.from <= day.to && i.to >= day.from);
       if (overlaps.length > 0) hits.push({ item, from: Math.min(...overlaps.map((i) => Math.max(i.from, day.from))) });
     }
@@ -1512,6 +1581,8 @@ export class PiPgmService {
       hymn: hymnData
     };
 
+    const hymnType = normalizeLibraryType(input.type);
+    if (hymnType) item.type = hymnType;
     this.library.set(item.id, item);
     this.persistItem(item.id);
 
@@ -1617,7 +1688,8 @@ export class PiPgmService {
               mimeType,
               assetUrl,
               ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
-              loop: input.loop ?? false
+              loop: input.loop ?? false,
+              origin: input.origin ?? "upload"
             }
           }
         : input.kind === "video"
@@ -1672,6 +1744,11 @@ export class PiPgmService {
               ...(input.caption ? { caption: input.caption } : {})
             }
           };
+
+    const type = normalizeLibraryType(input.type);
+    if (type) item.type = type;
+    const useAt = parseUseAt(input.useAt, USE_AT_ZONE);
+    if (useAt.length > 0) item.useAt = useAt;
 
     this.library.set(item.id, item);
     this.persistItem(item.id, assetId);

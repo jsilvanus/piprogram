@@ -5,7 +5,7 @@
  */
 
 import { readFile, writeFile } from "node:fs/promises";
-import { ApiError, ItemsService, OpenAPI, PipelinesService, PlaylistsService } from "./generated/index.js";
+import { ApiError, ItemsService, LibraryService, OpenAPI, PipelinesService, PlaylistsService } from "./generated/index.js";
 import { PipgmPipelineId as PipelineId } from "./generated/index.js";
 
 export interface CliIo {
@@ -47,7 +47,14 @@ const USAGE = `Usage: piprogram <command>
   playlists import <file.json> [--name <name>]
   playlists generate <YYYY-MM-DD> [--name <name>] [--out <file.json>]   (a draft from the items' useAt dates; not saved)
   playlists delete <playlistId>
-  items list
+  items list [--type t[,t]] [--q words] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--unscheduled] [--sort newest|oldest|title|used]
+  items upload-sound <file> [--title t] [--type sound|jingle|...] [--use-at date] [--recorded]   (any audio format; converted to mp3)
+  items set <itemId> [--title t] [--type t|none]
+  library active [--date YYYY-MM-DD]   (the active folder: items for the day plus hand-picked ones)
+  library active-add <itemId>
+  library active-remove <itemId>
+  library active-clear
+  library active-playlist <name> [--date YYYY-MM-DD] [--audio]   (save a playlist from the active folder)
   items show <itemId>
   items youtube <urlOrId> [--target <pipelineId>] [--cue]
   items hymn <title> --file <stanzas.txt> [--number n] [--target <pipelineId>] [--cue]
@@ -361,8 +368,57 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       return 0;
     }
     if (group === "items" && action === "list") {
-      const data = await ItemsService.listItems();
+      const sort = flag(rest, "--sort") as "newest" | "oldest" | "title" | "used" | undefined;
+      const data = await ItemsService.listItems(flag(rest, "--type"), undefined, flag(rest, "--q"), flag(rest, "--from"), flag(rest, "--to"), rest.includes("--unscheduled") ? true : undefined, sort);
       for (const item of data.items) io.out(JSON.stringify(item));
+      io.err(`${data.total} item(s); types: ${data.types.map((t) => `${t.type} ${t.count}`).join(", ") || "none"}`);
+      return 0;
+    }
+    if (group === "items" && action === "upload-sound") {
+      const file = rest[0];
+      if (!file || file.startsWith("--")) throw new Error("usage: items upload-sound <file> [--title t] [--type t] [--use-at date] [--recorded]");
+      const bytes = await readFile(file);
+      const filename = file.split(/[\\/]/).pop() ?? file;
+      const item = await ItemsService.createMediaItem({
+        kind: "audio",
+        filename,
+        dataBase64: bytes.toString("base64"),
+        ...(flag(rest, "--title") ? { title: flag(rest, "--title") } : {}),
+        ...(flag(rest, "--type") ? { type: flag(rest, "--type") } : {}),
+        ...(flag(rest, "--use-at") ? { useAt: flag(rest, "--use-at") } : {}),
+        ...(rest.includes("--recorded") ? { recorded: true } : {})
+      });
+      io.out(JSON.stringify(item, null, 2));
+      return 0;
+    }
+    if (group === "items" && action === "set") {
+      if (!rest[0]) throw new Error("usage: items set <itemId> [--title t] [--type t|none]");
+      const type = flag(rest, "--type");
+      io.out(JSON.stringify(await ItemsService.updateItem(rest[0], { ...(flag(rest, "--title") ? { title: flag(rest, "--title") } : {}), ...(type !== undefined ? { type: type === "none" ? null : type } : {}) }), null, 2));
+      return 0;
+    }
+    if (group === "library" && action === "active") {
+      const view = await LibraryService.getActiveFolder(flag(rest, "--date"));
+      for (const e of view.items) io.out(`${e.reason.padEnd(6)} ${JSON.stringify(e.item)}`);
+      io.err(`${view.date}: ${view.dateCount} by date, ${view.manualCount} by hand`);
+      return 0;
+    }
+    if (group === "library" && (action === "active-add" || action === "active-remove")) {
+      if (!rest[0]) throw new Error(`usage: library ${action} <itemId>`);
+      const view = action === "active-add" ? await LibraryService.addToActiveFolder(rest[0]) : await LibraryService.removeFromActiveFolder(rest[0]);
+      io.out(`${view.items.length} item(s) in the active folder`);
+      return 0;
+    }
+    if (group === "library" && action === "active-clear") {
+      await LibraryService.clearActiveFolder();
+      io.out("cleared the hand-picked items");
+      return 0;
+    }
+    if (group === "library" && action === "active-playlist") {
+      if (!rest[0] || rest[0].startsWith("--")) throw new Error("usage: library active-playlist <name> [--date YYYY-MM-DD] [--audio]");
+      const date = flag(rest, "--date");
+      const out = (await LibraryService.createPlaylistFromActiveFolder({ name: rest[0], ...(date ? { date } : {}), ...(rest.includes("--audio") ? { includeAudio: true } : {}) })) as { playlist: { id: string; name: string; items: unknown[] }; skippedAudio: number };
+      io.out(`saved ${out.playlist.id} "${out.playlist.name}" with ${out.playlist.items.length} item(s)${out.skippedAudio ? `; ${out.skippedAudio} sound item(s) left out` : ""}`);
       return 0;
     }
     if (group === "items" && action === "show") {
