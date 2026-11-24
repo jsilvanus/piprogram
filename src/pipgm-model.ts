@@ -396,10 +396,11 @@ export function buildHymnSteps(data: HymnItemData): PiPgmStepDescriptor[] {
     steps.push({
       stepIndex: 0,
       totalSteps,
-      label: `${data.hymnNumber} — ${data.title}`,
+      label: data.hymnNumber ? `${data.hymnNumber} — ${data.title}` : data.title,
       subLabel: "Title Slide",
       slideNumber: 0,
-      previewText: [hymnDisplayNumber(data.hymnNumber), data.title]
+      // A hymn without a number shows its title alone.
+      previewText: data.hymnNumber ? [hymnDisplayNumber(data.hymnNumber), data.title] : [data.title]
     });
   }
 
