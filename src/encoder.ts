@@ -64,6 +64,11 @@ export class EncoderSelector {
     return this.fellBack;
   }
 
+  /** False for an explicit encoder with the fallback off: every feed then uses it as set. */
+  get canFallBack(): boolean {
+    return this.fallbackEnabled;
+  }
+
   /**
    * A hardware-encoder ffmpeg died right after start. The first early failure only means the feeder starts
    * again on the hardware encoder; the second one switches the process to libx264. Returns true exactly once,

@@ -305,32 +305,48 @@ test("pre-warm: a loaded playlist is not idle and keeps the feed", async (t) => 
   feeders.stop();
 });
 
-test("second early failure of h264_v4l2m2m restarts all feeders with libx264 and remembers it", async () => {
-  const { procs, calls, spawn } = fakeSpawn();
-  const warnings: string[] = [];
-  const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
-  const feeders = new PipgmFeeders({ feedInput: "png",
+test("the first two feeds start on the hardware encoder, a third one on libx264", async () => {
+  const { calls, spawn } = fakeSpawn();
+  const feeders = new PipgmFeeders({
+    feedInput: "png",
     service: new PiPgmService(),
     rtspBase: "rtsp://x",
     spawn,
-    encoder: selector,
+    encoder: new EncoderSelector({ setting: "h264_v4l2m2m" }),
+    renderFrame: async () => Buffer.from("f")
+  });
+  await feeders.tick();
+  assert.deepEqual(calls.map((c) => c.includes("h264_v4l2m2m")), [true, true, false]);
+  feeders.stop();
+});
+
+test("a feed whose hardware encoder fails twice falls back alone; the other feeds keep the hardware encoder", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { procs, calls, spawn } = fakeSpawn();
+  const warnings: string[] = [];
+  const feeders = new PipgmFeeders({
+    feedInput: "png",
+    service: new PiPgmService(),
+    rtspBase: "rtsp://x",
+    spawn,
+    encoder: new EncoderSelector({ setting: "h264_v4l2m2m" }),
     renderFrame: async () => Buffer.from("f"),
     onFallback: (m) => warnings.push(m)
   });
   await feeders.tick();
-  assert.equal(calls.length, 3);
-  assert.ok(calls.every((c) => c.includes("h264_v4l2m2m")));
-  procs[0]!.crash(1); // first early failure: one retry on the hardware encoder, no fallback yet
+  procs[0]!.crash(1); // PiPGM1, first early failure: retried on the hardware encoder
   assert.equal(warnings.length, 0);
-  assert.equal(selector.current, "h264_v4l2m2m");
-  procs[1]!.crash(1); // second early failure: fall back
+  t.mock.timers.tick(5_000);
+  const retry = calls.slice(3);
+  assert.equal(retry.length, 1, "PiPGM1 is started again");
+  assert.ok(retry[0]!.includes("h264_v4l2m2m"));
+  procs[3]!.crash(1); // PiPGM1, second early failure: libx264 for PiPGM1 only
   assert.equal(warnings.length, 1);
-  assert.equal(selector.current, "libx264");
+  t.mock.timers.tick(5_000);
+  const after = calls.slice(4);
+  assert.equal(after.length, 1);
+  assert.ok(after[0]!.includes("libx264") && !after[0]!.includes("h264_v4l2m2m"));
   assert.equal(feeders.encoderInfo().fallback, true);
-  assert.equal(calls.length, 3 + 3, "all three relaunched at once");
-  assert.ok(calls.slice(3).every((c) => c.includes("libx264") && !c.includes("h264_v4l2m2m")));
-  procs[2]!.crash(1); // the old, already replaced process: no second warning
-  assert.equal(warnings.length, 1);
   feeders.stop();
 });
 
@@ -348,16 +364,6 @@ test("a late exit of h264_v4l2m2m does not trigger the fallback; explicit fallba
   assert.equal(off.noteEarlyFailure(), false);
   assert.equal(off.current, "h264_v4l2m2m");
   assert.equal(EncoderSelector.fixed("libx264").noteEarlyFailure(), false);
-});
-
-test("h264_v4l2m2m gets one retry: only the second early failure falls back to libx264", () => {
-  const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
-  assert.equal(selector.noteEarlyFailure(), false);
-  assert.equal(selector.current, "h264_v4l2m2m");
-  assert.equal(selector.noteEarlyFailure(), true);
-  assert.equal(selector.current, "libx264");
-  assert.equal(selector.fallenBack, true);
-  assert.equal(selector.noteEarlyFailure(), false);
 });
 
 test("auto encoder: probe on Linux only, cached by the selector", async () => {
