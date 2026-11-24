@@ -32,6 +32,10 @@ const USAGE = `Usage: piprogram <command>
   tts prepare <text> [--voice name]   (render a phrase to a WAV ahead of time; prints the audio item id)
   audio kill   (silence and disarm every pipeline)
   audio levels (volumes behind whisper, normal, loud, shout)
+  publish [status|on <rtspBase>|off|audio on|off]   (publish PiPGM1-3 to MediaMTX; runtime setting)
+  local-audio [status|on|off|device <hdmi0|hdmi1> <alsa-device|none>]
+  speak <itemId> [--level whisper|normal|loud|shout | --volume n] [--dry-run]
+  speak stop
   feeders   (state of the feed publishers to MediaMTX)
   pipelines orientation <pipelineId> <landscape|portrait>
   pipelines key <pipelineId> <#rrggbb|green|blue|off>   (chroma key colour for ATEM feeds; off = normal background)
@@ -230,6 +234,70 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       for (const [id, feed] of Object.entries(state.feeds ?? {})) {
         io.out(`${id}: ${feed.running ? "running" : "down"} ${feed.width ?? "-"}x${feed.height ?? "-"} restarts ${feed.restarts ?? 0}${feed.lastError ? ` (${feed.lastError})` : ""}`);
       }
+      return 0;
+    }
+    if (group === "publish") {
+      const sub = action ?? "status";
+      if (sub === "status") {
+        const state = await PipelinesService.getPublish();
+        io.out(`publishing ${state.enabled ? "on" : "off"} (${state.running ? "running" : "not running"}), ${state.rtspBase ?? "no address"}, sound ${state.audio ? "on" : "off"}, from ${state.source}`);
+        return 0;
+      }
+      if (sub === "on") {
+        const base = rest[0];
+        await PipelinesService.setPublish({ enabled: true, ...(base ? { rtspBase: base } : {}) });
+        io.out("publishing on");
+        return 0;
+      }
+      if (sub === "off") {
+        await PipelinesService.setPublish({ enabled: false });
+        io.out("publishing off");
+        return 0;
+      }
+      if (sub === "audio" && (rest[0] === "on" || rest[0] === "off")) {
+        await PipelinesService.setPublish({ audio: rest[0] === "on" });
+        io.out(`feed sound ${rest[0]}`);
+        return 0;
+      }
+      throw new Error("usage: publish [status|on <rtspBase>|off|audio on|off]");
+    }
+    if (group === "local-audio") {
+      const sub = action ?? "status";
+      if (sub === "status") {
+        const state = await PipelinesService.getLocalAudio();
+        io.out(`local audio ${state.enabled ? "on" : "off"}, devices ${JSON.stringify(state.devices ?? {})}${state.playing ? `, playing on ${state.output}` : ""}`);
+        return 0;
+      }
+      if (sub === "on" || sub === "off") {
+        await PipelinesService.setLocalAudio({ enabled: sub === "on" });
+        io.out(`local audio ${sub}`);
+        return 0;
+      }
+      if (sub === "device" && (rest[0] === "hdmi0" || rest[0] === "hdmi1") && rest[1]) {
+        await PipelinesService.setLocalAudio({ devices: { [rest[0]]: rest[1] === "none" ? null : rest[1] } });
+        io.out(`${rest[0]} device ${rest[1]}`);
+        return 0;
+      }
+      throw new Error("usage: local-audio [status|on|off|device <hdmi0|hdmi1> <alsa-device|none>]");
+    }
+    if (group === "speak") {
+      if (action === "stop") {
+        await PipelinesService.stopSpeakAudio();
+        io.out("stopped");
+        return 0;
+      }
+      if (!action) throw new Error("itemId is required");
+      const volume = flag(rest, "--volume");
+      const level = flag(rest, "--level");
+      if (volume !== undefined && level !== undefined) throw new Error("give --volume or --level, not both");
+      if (level !== undefined && !["whisper", "normal", "loud", "shout"].includes(level)) throw new Error("level must be whisper, normal, loud or shout");
+      const result = await PipelinesService.speakAudio({
+        itemId: action,
+        ...(volume !== undefined ? { volume: Number(volume) } : {}),
+        ...(level !== undefined ? { level: level as "whisper" | "normal" | "loud" | "shout" } : {}),
+        ...(hasFlag(rest, "--dry-run") ? { dryRun: true } : {})
+      });
+      io.out(`${result.played ? "playing" : "would play"} on ${result.output} (${result.device}) at volume ${result.volume}`);
       return 0;
     }
     if (group === "audio" && action === "levels") {

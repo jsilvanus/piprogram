@@ -32,6 +32,10 @@ import type { EncoderSelector } from "./encoder.js";
 import { PipgmFeeders, type FeedInput, type FeederEncoder, type PngToRaw, type SpawnFeeder } from "./feeder.js";
 import type { AudioToPcm } from "./feed-audio.js";
 import { AUDIO_LEVEL_NAMES, isAudioLevelName } from "./audio-levels.js";
+import { ALSA_DEVICE, LocalAudio, SoundOutputState, SOUND_OUTPUTS, isSoundOutput, type SoundOutput, type SpawnLocalPlayer } from "./local-audio.js";
+import { PublishController } from "./publish-controller.js";
+import { RuntimeSettingsFile } from "./runtime-settings.js";
+import { ffmpegAudioToPcm } from "./feed-audio.js";
 
 export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** The known hymnals (prefix and name); default VK and LV. A hymn number may carry any prefix, known or not. */
@@ -60,10 +64,14 @@ export interface PipgmServerOptions extends PiPgmServiceOptions {
   /** Renders the frame route. Defaults to headless Chromium (PIPGM_CHROMIUM). */
   frameRenderer?: PipgmFrameRenderer;
   /**
-   * Publish the three feeds (PiPGM1-3) to MediaMTX from this process. Undefined = off.
-   * Starts when the server is ready and stops when it closes.
+   * How the three feeds (PiPGM1-3) are published to MediaMTX from this process. Publishing itself is switched on and
+   * off at runtime (PUT /api/v1/pipgm/publish, kept in the cache directory); `rtspBase` and `audio` here only seed the
+   * first start, when nothing has been stored. Without `rtspBase` publishing starts off. The rest are tools:
+   * `encoder` may be a function that makes the selector when publishing is first switched on (the probe runs then).
    */
-  publish?: { rtspBase: string; ffmpeg?: string; encoder?: FeederEncoder | EncoderSelector; idleStopSeconds?: number; fps?: number; spawn?: SpawnFeeder; feedInput?: FeedInput; convert?: PngToRaw; audio?: boolean; audioToPcm?: AudioToPcm };
+  publish?: { rtspBase?: string; ffmpeg?: string; encoder?: FeederEncoder | EncoderSelector | (() => Promise<EncoderSelector>); idleStopSeconds?: number; fps?: number; spawn?: SpawnFeeder; feedInput?: FeedInput; convert?: PngToRaw; audio?: boolean; audioToPcm?: AudioToPcm };
+  /** Local audio (TTS straight to an HDMI sound card): seeds the first start; changed at runtime with PUT /api/v1/pipgm/local-audio. */
+  localAudio?: { devices?: Partial<Record<SoundOutput, string>>; aplay?: string; spawn?: SpawnLocalPlayer; toPcm?: AudioToPcm; soundOutputMaxAgeSeconds?: number };
 }
 
 const FRAME_MIN_SIDE = 16;
@@ -304,30 +312,47 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
   const invalidPlaylist = (reply: FastifyReply, errors: string[]) =>
     reply.code(422).send({ error: { code: "INVALID_PLAYLIST", message: errors.join("; "), errors } });
 
-  const feeders = options.publish
-    ? new PipgmFeeders({
+  const publishOptions = options.publish ?? {};
+  const publisher = new PublishController({
+    cacheDir: options.cacheDir,
+    defaults: { rtspBase: publishOptions.rtspBase, audio: publishOptions.audio },
+    onError: (message) => app.log.warn(message),
+    create: async ({ rtspBase, audio }) => {
+      const encoder = typeof publishOptions.encoder === "function" ? await publishOptions.encoder() : publishOptions.encoder;
+      return new PipgmFeeders({
         service,
         renderFrame,
-        rtspBase: options.publish.rtspBase,
-        ffmpeg: options.publish.ffmpeg,
-        encoder: options.publish.encoder,
-        idleStopSeconds: options.publish.idleStopSeconds,
+        rtspBase,
+        ffmpeg: publishOptions.ffmpeg,
+        encoder,
+        idleStopSeconds: publishOptions.idleStopSeconds,
         onFallback: (message) => app.log.warn(message),
-        fps: options.publish.fps,
-        feedInput: options.publish.feedInput,
-        convert: options.publish.convert,
-        ...(options.publish.audio
-          ? { audio: { load: (itemId: string) => service.readAudioItemBytes(itemId), toPcm: options.publish.audioToPcm } }
-          : {}),
-        spawn: options.publish.spawn,
+        fps: publishOptions.fps,
+        feedInput: publishOptions.feedInput,
+        convert: publishOptions.convert,
+        ...(audio ? { audio: { load: (itemId: string) => service.readAudioItemBytes(itemId), toPcm: publishOptions.audioToPcm } } : {}),
+        spawn: publishOptions.spawn,
         steps,
         onError: (pipelineId, message) => app.log.warn({ pipelineId, err: message }, "feed publisher")
-      })
-    : null;
-  if (feeders) {
-    app.addHook("onReady", async () => feeders.start());
-    app.addHook("onClose", async () => feeders.stop());
-  }
+      });
+    }
+  });
+  app.addHook("onReady", async () => publisher.start());
+  app.addHook("onClose", async () => publisher.stop());
+
+  // Local audio: a spoken item straight to an HDMI sound card. Which output reaches the PA is reported by pigateway.
+  const localSeed = options.localAudio ?? {};
+  const localFile = new RuntimeSettingsFile<{ enabled: boolean; devices: Partial<Record<SoundOutput, string>> }>(options.cacheDir, "local-audio.json");
+  const localStored = localFile.read();
+  const localAudio = new LocalAudio({
+    enabled: localStored?.enabled === true,
+    devices: localStored?.devices ?? localSeed.devices ?? {},
+    aplay: localSeed.aplay,
+    spawn: localSeed.spawn,
+    toPcm: localSeed.toPcm ?? ffmpegAudioToPcm(publishOptions.ffmpeg)
+  });
+  const soundOutput = new SoundOutputState((localSeed.soundOutputMaxAgeSeconds ?? 30) * 1000);
+  app.addHook("onClose", async () => localAudio.stop());
 
   // The stored library is read when the server is ready; if the store is down, that and any unsaved
   // writes are retried on a timer until they go through.
@@ -524,11 +549,79 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     );
   }
 
-  app.get("/api/v1/pipgm/feeders", async () => ({
-    enabled: feeders !== null,
-    feeds: feeders ? feeders.status() : {},
-    ...(feeders ? feeders.encoderInfo() : {})
-  }));
+  app.get("/api/v1/pipgm/feeders", async () => {
+    const feeders = publisher.current;
+    return {
+      enabled: feeders !== null,
+      feeds: feeders ? feeders.status() : {},
+      ...(feeders ? feeders.encoderInfo() : {})
+    };
+  });
+
+  // Publishing of PiPGM1-3 to MediaMTX, switched at runtime (replaces the PIPGM_PUBLISH_* env switch).
+  app.get("/api/v1/pipgm/publish", async () => publisher.snapshot());
+  app.put<{ Body: { enabled?: unknown; rtspBase?: unknown; audio?: unknown } }>("/api/v1/pipgm/publish", async (request, reply) => {
+    const result = await publisher.apply(request.body ?? {});
+    if (!result.ok) return invalid(reply, result.code, result.message);
+    return reply.code(200).send(publisher.snapshot());
+  });
+
+  // Local audio (TTS straight to an HDMI sound card) and the output pigateway says reaches the PA.
+  const localAudioView = () => ({ ...localAudio.config(), configured: localAudio.configured, ...localAudio.status() });
+  app.get("/api/v1/pipgm/local-audio", async () => localAudioView());
+  app.put<{ Body: { enabled?: unknown; devices?: unknown } }>("/api/v1/pipgm/local-audio", async (request, reply) => {
+    const body = request.body ?? {};
+    if (body.enabled !== undefined && typeof body.enabled !== "boolean") return invalid(reply, "INVALID_ENABLED", "enabled must be a boolean");
+    const devices: Partial<Record<SoundOutput, string | null>> = {};
+    if (body.devices !== undefined) {
+      if (!body.devices || typeof body.devices !== "object" || Array.isArray(body.devices)) return invalid(reply, "INVALID_DEVICES", "devices must be an object like {\"hdmi0\": \"hdmi:CARD=vc4hdmi0\"}");
+      for (const [name, device] of Object.entries(body.devices as Record<string, unknown>)) {
+        if (!isSoundOutput(name)) return invalid(reply, "INVALID_DEVICES", `unknown output ${name} (use ${SOUND_OUTPUTS.join(", ")})`);
+        if (device === null) devices[name] = null;
+        else if (typeof device === "string" && ALSA_DEVICE.test(device)) devices[name] = device;
+        else return invalid(reply, "INVALID_DEVICES", `${name} needs an ALSA device name (letters, digits and . _ : , = / -) or null`);
+      }
+    }
+    localAudio.configure({ ...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}), devices });
+    localFile.write(localAudio.config());
+    return reply.code(200).send(localAudioView());
+  });
+  app.get("/api/v1/pipgm/audio/sound-output", async () => soundOutput.snapshot());
+  app.put<{ Body: { output?: unknown; source?: unknown } }>("/api/v1/pipgm/audio/sound-output", async (request, reply) => {
+    const body = request.body ?? {};
+    if (body.output !== null && !isSoundOutput(body.output)) return invalid(reply, "INVALID_OUTPUT", `output must be ${SOUND_OUTPUTS.join(", ")} or null`);
+    soundOutput.set(body.output, typeof body.source === "string" ? body.source.slice(0, 40) : "api");
+    return reply.code(200).send(soundOutput.snapshot());
+  });
+  app.post<{ Body: { itemId?: unknown; level?: unknown; volume?: unknown; dryRun?: unknown } }>("/api/v1/pipgm/audio/speak", async (request, reply) => {
+    const body = request.body ?? {};
+    const itemId = typeof body.itemId === "string" ? body.itemId.trim() : "";
+    if (!itemId) return invalid(reply, "ITEM_ID_REQUIRED", "itemId is required");
+    if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") return invalid(reply, "INVALID_DRY_RUN", "dryRun must be a boolean");
+    const resolved = resolveVolume(body.volume, body.level);
+    if (!resolved.ok) return invalid(reply, resolved.code, resolved.message);
+    const output = soundOutput.current();
+    if (!output) {
+      return reply.code(409).send({ error: { code: "SOUND_OUTPUT_UNKNOWN", message: "no Pi HDMI output is currently reported to reach the PA (pigateway has not told us, or the report is stale, or none is routed to it)" } });
+    }
+    const item = service.getLibraryItem(itemId);
+    if (!item) return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown PiPGM item: ${itemId}` } });
+    if (item.kind !== "audio" || !item.audio) return invalid(reply, "ITEM_NOT_AUDIO", `Item ${itemId} is not an audio item`);
+    const audio = body.dryRun === true ? Buffer.alloc(0) : await service.readAudioItemBytes(itemId);
+    if (!audio) return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Item ${itemId} has no sound file` } });
+    // The same gain cap as the feeds; the default volume is the "normal" level.
+    const volume = Math.min(resolved.volume ?? service.audioLevels.normal, service.maxAudioVolume);
+    const result = await localAudio.play({ audio, output, volume, itemId, dryRun: body.dryRun === true });
+    if (!result.ok) {
+      const status = result.code === "LOCAL_AUDIO_NOT_CONFIGURED" ? 409 : result.code === "NO_DEVICE_FOR_OUTPUT" ? 409 : result.code === "BAD_AUDIO" ? 422 : 502;
+      return reply.code(status).send({ error: { code: result.code, message: result.message } });
+    }
+    return reply.code(200).send({ played: !result.dryRun, dryRun: result.dryRun, output: result.output, device: result.device, volume: result.volume, cappedAt: service.maxAudioVolume });
+  });
+  app.post("/api/v1/pipgm/audio/speak/stop", async (_request, reply) => {
+    localAudio.stop();
+    return reply.code(200).send(localAudioView());
+  });
 
   // The stage page is silent unless opened with ?audio=1 (the link the sound-capturing page worker uses),
   // so a preview at a desk or a screenshot never plays the feed's sound a second time.
@@ -820,6 +913,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   // Kill switch: silences every pipeline, clears the tracks and disarms. Needs the API key like any write.
   app.post("/api/v1/pipgm/audio/kill", async (_request, reply) => {
+    localAudio.stop();
     return reply.code(200).send({ items: service.killAudio() });
   });
 

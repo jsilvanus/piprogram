@@ -415,6 +415,166 @@ paths:
                       shout: {type: number}
                   maxVolume:
                     type: number
+  /api/v1/pipgm/publish:
+    get:
+      operationId: getPublish
+      tags: [Pipelines]
+      description: Whether the three feeds are published to MediaMTX, where, and whether they carry sound. Runtime setting, kept across restarts; off by default.
+      responses:
+        "200":
+          description: Publishing settings and whether the feeders run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishSettings"
+    put:
+      operationId: setPublish
+      tags: [Pipelines]
+      description: Switch publishing on or off, or change the address or sound. A change restarts the feeds once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+                rtspBase:
+                  type: string
+                  description: MediaMTX RTSP base, for example rtsp://127.0.0.1:8554 (required to enable when none is stored)
+                audio:
+                  type: boolean
+                  description: Feeds carry an AAC track (silent until a track plays on an armed feed)
+      responses:
+        "200":
+          description: Settings after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishSettings"
+  /api/v1/pipgm/local-audio:
+    get:
+      operationId: getLocalAudio
+      tags: [Pipelines]
+      description: Local audio (spoken items straight to an HDMI sound card, no stream). Off by default.
+      responses:
+        "200":
+          description: Settings and whether a phrase is playing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalAudio"
+    put:
+      operationId: setLocalAudio
+      tags: [Pipelines]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+                devices:
+                  type: object
+                  description: ALSA device per Pi HDMI output; null removes one
+                  properties:
+                    hdmi0: {type: string, nullable: true}
+                    hdmi1: {type: string, nullable: true}
+      responses:
+        "200":
+          description: Settings after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalAudio"
+  /api/v1/pipgm/audio/sound-output:
+    get:
+      operationId: getSoundOutput
+      tags: [Pipelines]
+      description: Which Pi HDMI output reaches the PA, as pigateway last reported. A report older than maxAgeSeconds counts as unknown.
+      responses:
+        "200":
+          description: The reported output
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SoundOutput"
+    put:
+      operationId: setSoundOutput
+      tags: [Pipelines]
+      description: pigateway reports the output (from the Atlona route); null = none reaches the PA.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [output]
+              properties:
+                output:
+                  type: string
+                  enum: [hdmi0, hdmi1]
+                  nullable: true
+                source: {type: string}
+      responses:
+        "200":
+          description: The report as stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SoundOutput"
+  /api/v1/pipgm/audio/speak:
+    post:
+      operationId: speakAudio
+      tags: [Pipelines]
+      description: >
+        Play an audio item (for example prepared TTS) on the Pi HDMI output that reaches the PA. Needs local audio on
+        and a fresh sound-output report (409 otherwise). volume or level, capped by PIPGM_AUDIO_MAX_VOLUME; default is
+        the normal level. dryRun checks and reports without playing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [itemId]
+              properties:
+                itemId: {type: string}
+                level: {type: string, enum: [whisper, normal, loud, shout]}
+                volume: {type: number, minimum: 0, maximum: 100}
+                dryRun: {type: boolean}
+      responses:
+        "200":
+          description: What played (or would play)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  played: {type: boolean}
+                  dryRun: {type: boolean}
+                  output: {type: string}
+                  device: {type: string}
+                  volume: {type: number}
+                  cappedAt: {type: number}
+        "409":
+          description: Local audio off, no device for the output, or the sound output is unknown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/v1/pipgm/audio/speak/stop:
+    post:
+      operationId: stopSpeakAudio
+      tags: [Pipelines]
+      responses:
+        "200":
+          description: Local audio state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalAudio"
   /api/v1/pipgm/audio/kill:
     post:
       operationId: killAudio
@@ -1677,6 +1837,37 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
   schemas:
+    PublishSettings:
+      type: object
+      properties:
+        enabled: {type: boolean}
+        rtspBase: {type: string, nullable: true}
+        audio: {type: boolean}
+        source: {type: string, enum: [stored, env, default]}
+        running: {type: boolean}
+    LocalAudio:
+      type: object
+      properties:
+        enabled: {type: boolean}
+        configured: {type: boolean}
+        devices:
+          type: object
+          properties:
+            hdmi0: {type: string}
+            hdmi1: {type: string}
+        playing: {type: boolean}
+        output: {type: string, nullable: true}
+        itemId: {type: string, nullable: true}
+        startedAt: {type: string, nullable: true}
+    SoundOutput:
+      type: object
+      properties:
+        output: {type: string, nullable: true, description: The output to play on now (null when unknown or stale)}
+        reported: {type: string, nullable: true}
+        stale: {type: boolean}
+        updatedAt: {type: string, nullable: true}
+        source: {type: string, nullable: true}
+        maxAgeSeconds: {type: number}
     LoadReport:
       type: object
       required: [mode, resolved, missing, duplicates, skipped, keptActiveItemId, carriedActiveItem]
