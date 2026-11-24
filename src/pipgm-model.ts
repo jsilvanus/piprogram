@@ -1,4 +1,5 @@
 import type { ManagedStreamSnapshot } from "./types/external.js";
+import { splitHymnNumber } from "./hymnals.js";
 
 export const pipgmPipelineDefinitions = [
   { id: "PiPGM1", label: "Pi Programme 1", defaultOrientation: "portrait" as const, defaultHidden: false },
@@ -380,6 +381,13 @@ export function parseHymnStanzasFromText(rawText: string): HymnStanza[] {
   });
 }
 
+/** How a hymn number reads on screen: VK30 is "Virsi 30", other books keep their prefix ("LV 5"). */
+export function hymnDisplayNumber(hymnNumber: string | undefined): string {
+  const parts = splitHymnNumber(hymnNumber);
+  if (!parts) return hymnNumber ?? "";
+  return parts.prefix === "VK" ? `Virsi ${parts.number}` : `${parts.prefix} ${parts.number}`;
+}
+
 export function buildHymnSteps(data: HymnItemData): PiPgmStepDescriptor[] {
   const steps: PiPgmStepDescriptor[] = [];
   const totalSteps = data.stanzas.length + (data.includeTitleSlide ? 1 : 0);
@@ -391,7 +399,7 @@ export function buildHymnSteps(data: HymnItemData): PiPgmStepDescriptor[] {
       label: `${data.hymnNumber} — ${data.title}`,
       subLabel: "Title Slide",
       slideNumber: 0,
-      previewText: [data.hymnNumber, data.title]
+      previewText: [hymnDisplayNumber(data.hymnNumber), data.title]
     });
   }
 

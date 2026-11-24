@@ -82,39 +82,34 @@ export function renderPiPgmStageHtml(pipeline: PiPgmPipelineSnapshot, options: P
       text-align: center;
       position: relative;
     }
-    /* Hymn Stanza Layout */
+    /* Hymn: title slide (number, then title) and stanza slides (the words only) */
     .hymn-slide {
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 2.8vh;
+      gap: 3vh;
+      width: 100%;
       max-width: 92%;
       animation: fadeSlideIn 320ms ease-out;
     }
-    .hymn-header {
+    .hymn-number {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      font-size: ${isPortrait ? "3.2vw" : "1.8vw"};
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
+      font-size: ${isPortrait ? "5vw" : "3.2vw"};
+      letter-spacing: 0.08em;
       color: #fbbf24;
       font-weight: 700;
+      text-shadow: 0 2px 12px rgba(0,0,0,0.85);
     }
+    .hymn-title,
     .hymn-stanza-lines {
       display: flex;
       flex-direction: column;
       gap: 1.4vh;
-      font-size: ${isPortrait ? "5.2vw" : "3.3vw"};
-      line-height: 1.38;
+      font-size: ${isPortrait ? "7vw" : "4.4vw"};
+      line-height: 1.32;
       color: #ffffff;
       text-shadow: 0 2px 12px rgba(0,0,0,0.85);
-    }
-    .hymn-footer {
-      margin-top: 2vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: ${isPortrait ? "2.6vw" : "1.4vw"};
-      color: #94a3b8;
-      letter-spacing: 0.08em;
     }
     /* PowerPoint Slide + Step Animation Builds */
     .pptx-slide {
@@ -266,13 +261,19 @@ ${options.transparent ? TRANSPARENT_STYLE : keyStyle(options.keyColor)}</head>
 
       if (activeItem.kind === "hymn" && activeItem.hymn) {
         const lines = (step && step.previewText) ? step.previewText : [];
-        content.innerHTML = \`
+        // Title slide (slideNumber 0): the hymn number, then the title. Stanza slides: the words only.
+        content.innerHTML = step && step.slideNumber === 0
+          ? \`
           <div class="hymn-slide">
-            <div class="hymn-header">\${escapeText(activeItem.hymn.hymnNumber)} — \${escapeText(activeItem.hymn.title)}</div>
+            <div class="hymn-number">\${escapeText(lines[0] || "")}</div>
+            <div class="hymn-title">\${escapeText(lines[1] || "")}</div>
+          </div>
+        \`
+          : \`
+          <div class="hymn-slide">
             <div class="hymn-stanza-lines">
               \${lines.map((line) => \`<div>\${escapeText(line)}</div>\`).join("")}
             </div>
-            <div class="hymn-footer">\${escapeText(step ? step.label : "")}</div>
           </div>
         \`;
         return;
