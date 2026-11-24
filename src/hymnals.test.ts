@@ -25,3 +25,10 @@ test("the hymnal list is configurable and always has the Virsikirja", () => {
   assert.deepEqual(parseHymnals('[{"prefix":"nv","name":"Nuorten"}]').map((h) => h.prefix), ["VK", "NV"]);
   assert.deepEqual(parseHymnals("1=bad").map((h) => h.prefix), ["VK", "LV"]);
 });
+
+test("the title slide reads Virsi for VK and keeps other books' prefix", async () => {
+  const { hymnDisplayNumber } = await import("./pipgm-model.js");
+  assert.equal(hymnDisplayNumber("VK30"), "Virsi 30");
+  assert.equal(hymnDisplayNumber("30"), "Virsi 30");
+  assert.equal(hymnDisplayNumber("LV5"), "LV 5");
+});
