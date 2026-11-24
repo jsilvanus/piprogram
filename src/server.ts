@@ -327,6 +327,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
         ffmpeg: publishOptions.ffmpeg,
         encoder,
         idleStopSeconds: publishOptions.idleStopSeconds,
+        startGapMs: 1500,
         onFallback: (message) => app.log.warn(message),
         fps: publishOptions.fps,
         feedInput: publishOptions.feedInput,

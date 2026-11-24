@@ -463,6 +463,8 @@ export interface PipgmFeedersOptions {
   encoder?: FeederEncoder | EncoderSelector | undefined;
   /** Seconds a pipeline may have no slide before its feeder is stopped; 0/undefined = never. */
   idleStopSeconds?: number | undefined;
+  /** Least time between two feeds starting their ffmpeg; 0 or unset = start at once. The server sets 1500 ms: starting all three at once made the hardware encoder fail. */
+  startGapMs?: number | undefined;
   /** Called once when the hardware encoder failed early and the feeders switched to libx264. */
   onFallback?: ((message: string) => void) | undefined;
   fps?: number | undefined;
@@ -526,6 +528,7 @@ export class PipgmFeeders {
   private readonly toPcm: AudioToPcm | undefined;
   /** Feeds that are published. Others are left alone: no ffmpeg, no stream. Default all three. */
   private active: Set<PiPgmPipelineId>;
+  private lastStartAt = 0;
 
   constructor(private readonly options: PipgmFeedersOptions) {
     this.active = new Set(options.feeds ?? FEED_IDS);
@@ -680,6 +683,10 @@ export class PipgmFeeders {
     }
     const key = pictureKey(snapshot);
     if (this.shown.get(id) === key) return;
+    // A feed that is not running starts its ffmpeg only when the previous start is long enough ago; the next pass tries again.
+    const feeder = this.feeders.get(id)!;
+    const wasRunning = feeder.status().running;
+    if (!wasRunning && Date.now() - this.lastStartAt < (this.options.startGapMs ?? 0)) return;
     const { width, height } = snapshot.resolution;
     try {
       let png: Buffer;
@@ -700,7 +707,8 @@ export class PipgmFeeders {
           if (!snapshot.keyColor) void this.options.steps?.remember(snapshot, png);
         }
       }
-      this.feeders.get(id)!.show(png, width, height);
+      feeder.show(png, width, height);
+      if (!wasRunning) this.lastStartAt = Date.now();
       this.shown.set(id, key);
     } catch (error) {
       // Not recorded as shown: the next pass tries again. The feed keeps its last picture.

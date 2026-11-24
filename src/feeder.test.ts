@@ -305,7 +305,7 @@ test("pre-warm: a loaded playlist is not idle and keeps the feed", async (t) => 
   feeders.stop();
 });
 
-test("early failure of h264_v4l2m2m restarts all feeders with libx264 and remembers it", async () => {
+test("second early failure of h264_v4l2m2m restarts all feeders with libx264 and remembers it", async () => {
   const { procs, calls, spawn } = fakeSpawn();
   const warnings: string[] = [];
   const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
@@ -320,13 +320,16 @@ test("early failure of h264_v4l2m2m restarts all feeders with libx264 and rememb
   await feeders.tick();
   assert.equal(calls.length, 3);
   assert.ok(calls.every((c) => c.includes("h264_v4l2m2m")));
-  procs[0]!.crash(1);
+  procs[0]!.crash(1); // first early failure: one retry on the hardware encoder, no fallback yet
+  assert.equal(warnings.length, 0);
+  assert.equal(selector.current, "h264_v4l2m2m");
+  procs[1]!.crash(1); // second early failure: fall back
   assert.equal(warnings.length, 1);
   assert.equal(selector.current, "libx264");
   assert.equal(feeders.encoderInfo().fallback, true);
   assert.equal(calls.length, 3 + 3, "all three relaunched at once");
   assert.ok(calls.slice(3).every((c) => c.includes("libx264") && !c.includes("h264_v4l2m2m")));
-  procs[1]!.crash(1); // the old, already replaced process: no second warning
+  procs[2]!.crash(1); // the old, already replaced process: no second warning
   assert.equal(warnings.length, 1);
   feeders.stop();
 });
@@ -345,6 +348,16 @@ test("a late exit of h264_v4l2m2m does not trigger the fallback; explicit fallba
   assert.equal(off.noteEarlyFailure(), false);
   assert.equal(off.current, "h264_v4l2m2m");
   assert.equal(EncoderSelector.fixed("libx264").noteEarlyFailure(), false);
+});
+
+test("h264_v4l2m2m gets one retry: only the second early failure falls back to libx264", () => {
+  const selector = new EncoderSelector({ setting: "h264_v4l2m2m" });
+  assert.equal(selector.noteEarlyFailure(), false);
+  assert.equal(selector.current, "h264_v4l2m2m");
+  assert.equal(selector.noteEarlyFailure(), true);
+  assert.equal(selector.current, "libx264");
+  assert.equal(selector.fallenBack, true);
+  assert.equal(selector.noteEarlyFailure(), false);
 });
 
 test("auto encoder: probe on Linux only, cached by the selector", async () => {
