@@ -476,6 +476,8 @@ export interface PipgmFeedersOptions {
    * one-shot ffmpeg). Without this option the streams have no audio track.
    */
   audio?: { load(itemId: string): Promise<Buffer | null>; toPcm?: AudioToPcm | undefined } | undefined;
+  /** Which feeds publish (default all three). Change later with `setActive`. */
+  feeds?: PiPgmPipelineId[] | undefined;
   /** How often the pipelines are looked at for a change, default 250 ms. */
   intervalMs?: number | undefined;
   spawn?: SpawnFeeder | undefined;
@@ -507,7 +509,7 @@ export function hasContent(snapshot: PiPgmPipelineSnapshot): boolean {
   return snapshot.activeItemId !== null || snapshot.basicImageItemId !== null || snapshot.playlist.length > 0;
 }
 
-export type FeederState = "running" | "idle-stopped" | "stopped";
+export type FeederState = "running" | "idle-stopped" | "stopped" | "off";
 export type PipgmFeederStatus = StillFeederStatus & { state: FeederState };
 
 /** Follows the three pipelines in this process and keeps their feeds up to date. */
@@ -522,8 +524,11 @@ export class PipgmFeeders {
   private readonly sound = new Map<PiPgmPipelineId, FeedAudio>();
   private readonly loading = new Map<PiPgmPipelineId, string>();
   private readonly toPcm: AudioToPcm | undefined;
+  /** Feeds that are published. Others are left alone: no ffmpeg, no stream. Default all three. */
+  private active: Set<PiPgmPipelineId>;
 
   constructor(private readonly options: PipgmFeedersOptions) {
+    this.active = new Set(options.feeds ?? FEED_IDS);
     this.toPcm = options.audio ? (options.audio.toPcm ?? ffmpegAudioToPcm(options.ffmpeg)) : undefined;
     const enc = options.encoder;
     this.selector = enc instanceof EncoderSelector ? enc : EncoderSelector.fixed(enc ?? "libx264");
@@ -551,7 +556,7 @@ export class PipgmFeeders {
     return Object.fromEntries(
       FEED_IDS.map((id) => {
         const status = this.feeders.get(id)!.status();
-        const state: FeederState = this.idleStopped.has(id) ? "idle-stopped" : status.running ? "running" : "stopped";
+        const state: FeederState = !this.active.has(id) ? "off" : this.idleStopped.has(id) ? "idle-stopped" : status.running ? "running" : "stopped";
         return [id, { ...status, state }];
       })
     );
@@ -570,6 +575,22 @@ export class PipgmFeeders {
     if (!this.selector.noteEarlyFailure()) return;
     this.options.onFallback?.(`h264_v4l2m2m failed within its first seconds (${reason}); using libx264 from now on`);
     for (const feeder of this.feeders.values()) feeder.restartProcess();
+  }
+
+  /** Publishes exactly these feeds. A feed that is switched off stops its ffmpeg at once; the others are not touched. */
+  setActive(ids: string[]): void {
+    const next = new Set(FEED_IDS.filter((id) => ids.includes(id)));
+    for (const id of FEED_IDS) {
+      if (this.active.has(id) && !next.has(id)) {
+        this.feeders.get(id)!.stop();
+        this.shown.delete(id);
+        this.idleSince.delete(id);
+        this.idleStopped.delete(id);
+        this.loading.delete(id);
+      }
+    }
+    this.active = next;
+    if (this.timer) void this.tick();
   }
 
   start(): void {
@@ -594,7 +615,7 @@ export class PipgmFeeders {
     if (this.running) return;
     this.running = true;
     try {
-      for (const id of FEED_IDS) await this.follow(id);
+      for (const id of FEED_IDS) if (this.active.has(id)) await this.follow(id);
     } finally {
       this.running = false;
     }

@@ -317,12 +317,13 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
     cacheDir: options.cacheDir,
     defaults: { rtspBase: publishOptions.rtspBase, audio: publishOptions.audio },
     onError: (message) => app.log.warn(message),
-    create: async ({ rtspBase, audio }) => {
+    create: async ({ rtspBase, audio, feeds }) => {
       const encoder = typeof publishOptions.encoder === "function" ? await publishOptions.encoder() : publishOptions.encoder;
       return new PipgmFeeders({
         service,
         renderFrame,
         rtspBase,
+        feeds,
         ffmpeg: publishOptions.ffmpeg,
         encoder,
         idleStopSeconds: publishOptions.idleStopSeconds,
@@ -560,7 +561,7 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
 
   // Publishing of PiPGM1-3 to MediaMTX, switched at runtime (replaces the PIPGM_PUBLISH_* env switch).
   app.get("/api/v1/pipgm/publish", async () => publisher.snapshot());
-  app.put<{ Body: { enabled?: unknown; rtspBase?: unknown; audio?: unknown } }>("/api/v1/pipgm/publish", async (request, reply) => {
+  app.put<{ Body: { enabled?: unknown; feeds?: unknown; rtspBase?: unknown; audio?: unknown } }>("/api/v1/pipgm/publish", async (request, reply) => {
     const result = await publisher.apply(request.body ?? {});
     if (!result.ok) return invalid(reply, result.code, result.message);
     return reply.code(200).send(publisher.snapshot());
