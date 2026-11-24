@@ -261,12 +261,12 @@ ${options.transparent ? TRANSPARENT_STYLE : keyStyle(options.keyColor)}</head>
 
       if (activeItem.kind === "hymn" && activeItem.hymn) {
         const lines = (step && step.previewText) ? step.previewText : [];
-        // Title slide (slideNumber 0): the hymn number, then the title. Stanza slides: the words only.
+        // Title slide (slideNumber 0): the hymn number (when there is one), then the title. Stanza slides: the words only.
         content.innerHTML = step && step.slideNumber === 0
           ? \`
           <div class="hymn-slide">
-            <div class="hymn-number">\${escapeText(lines[0] || "")}</div>
-            <div class="hymn-title">\${escapeText(lines[1] || "")}</div>
+            \${lines.length > 1 ? '<div class="hymn-number">' + escapeText(lines[0]) + '</div>' : ""}
+            <div class="hymn-title">\${escapeText(lines[lines.length - 1] || "")}</div>
           </div>
         \`
           : \`
