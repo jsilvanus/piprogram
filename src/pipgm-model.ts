@@ -214,6 +214,8 @@ export interface PiPgmItem {
   audio?: AudioItemData;
   /** When the item is meant to be used (see use-at.ts): days, hours, moments, ranges. */
   useAt?: string[];
+  /** Days the item was used (src/used-on.ts): a record of past use, several allowed. Missing = never recorded. */
+  usedOn?: string[];
   /**
    * The library type the user filters by (src/library-query.ts): a short lowercase name such as sound, tts, hymn,
    * song, jingle. Not set = the default for the item's kind.

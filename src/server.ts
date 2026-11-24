@@ -8,6 +8,7 @@
  */
 
 import { UseAtError } from "./use-at.js";
+import { UsedOnError } from "./used-on.js";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -434,6 +435,33 @@ export function buildPipgmServer(options: PipgmServerOptions = {}): FastifyInsta
       return item;
     } catch (error) {
       if (error instanceof UseAtError) return invalid(reply, "INVALID_USE_AT", error.message);
+      throw error;
+    }
+  });
+
+  // Days an item was used (src/used-on.ts). One is added per call; a day can be taken off again.
+  app.post<{ Params: { itemId: string }; Body: { date?: unknown } }>("/api/v1/pipgm/items/:itemId/used-on", async (request, reply) => {
+    try {
+      const item = service.addUsedOn(request.params.itemId, request.body?.date);
+      if (item === "ITEM_NOT_FOUND") {
+        return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+      }
+      return item;
+    } catch (error) {
+      if (error instanceof UsedOnError) return invalid(reply, "INVALID_USED_ON", error.message);
+      throw error;
+    }
+  });
+
+  app.delete<{ Params: { itemId: string; date: string } }>("/api/v1/pipgm/items/:itemId/used-on/:date", async (request, reply) => {
+    try {
+      const item = service.removeUsedOn(request.params.itemId, request.params.date);
+      if (item === "ITEM_NOT_FOUND") {
+        return reply.code(404).send({ error: { code: "ITEM_NOT_FOUND", message: `Unknown library item: ${request.params.itemId}` } });
+      }
+      return item;
+    } catch (error) {
+      if (error instanceof UsedOnError) return invalid(reply, "INVALID_USED_ON", error.message);
       throw error;
     }
   });

@@ -424,3 +424,29 @@ test("pauses and auto-advance seconds are kept in a saved playlist; a load skips
     await app.close();
   }
 });
+
+test("a hymn gets used-on dates: several, sorted, no duplicates, removable; refused when not a day", async () => {
+  const app = buildPipgmServer();
+  try {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/pipgm/items/hymn",
+      payload: { title: "Käyttöhymni", stanzas: [{ stanzaNumber: 1, lines: ["säe"] }] }
+    });
+    const id = created.json().id as string;
+    const url = `/api/v1/pipgm/items/${id}/used-on`;
+    assert.equal((await app.inject({ method: "POST", url, payload: { date: "2026-11-29" } })).statusCode, 200);
+    const again = await app.inject({ method: "POST", url, payload: { date: "2026-11-08" } });
+    assert.deepEqual(again.json().usedOn, ["2026-11-08", "2026-11-29"]);
+    const dup = await app.inject({ method: "POST", url, payload: { date: "2026-11-08" } });
+    assert.deepEqual(dup.json().usedOn, ["2026-11-08", "2026-11-29"]);
+    assert.equal((await app.inject({ method: "POST", url, payload: { date: "2026-02-30" } })).statusCode, 422);
+    assert.equal((await app.inject({ method: "POST", url: "/api/v1/pipgm/items/nope/used-on", payload: { date: "2026-11-08" } })).statusCode, 404);
+    const removed = await app.inject({ method: "DELETE", url: `${url}/2026-11-08` });
+    assert.deepEqual(removed.json().usedOn, ["2026-11-29"]);
+    // Hymns are not in the expiring (Canva) set: nothing in the item says it is to be cleaned up.
+    assert.equal((removed.json() as { expiresAt?: string }).expiresAt, undefined);
+  } finally {
+    await app.close();
+  }
+});
