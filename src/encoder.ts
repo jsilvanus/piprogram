@@ -42,6 +42,7 @@ export interface EncoderSelectorOptions {
 export class EncoderSelector {
   private encoder: FeederEncoder;
   private fellBack = false;
+  private earlyFailures = 0;
   private readonly fallbackEnabled: boolean;
 
   constructor(options: EncoderSelectorOptions) {
@@ -64,11 +65,14 @@ export class EncoderSelector {
   }
 
   /**
-   * A hardware-encoder ffmpeg died right after start. Returns true exactly once, when this call switched
-   * the process to libx264 (the caller restarts the feeders and warns); false when nothing changed.
+   * A hardware-encoder ffmpeg died right after start. The first early failure only means the feeder starts
+   * again on the hardware encoder; the second one switches the process to libx264. Returns true exactly once,
+   * when this call switched (the caller restarts the feeders and warns); false when nothing changed.
    */
   noteEarlyFailure(): boolean {
     if (!this.fallbackEnabled || this.encoder !== "h264_v4l2m2m") return false;
+    this.earlyFailures += 1;
+    if (this.earlyFailures < 2) return false;
     this.encoder = "libx264";
     this.fellBack = true;
     return true;
