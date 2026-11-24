@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { LibraryPersistence, PiStorageBlobStore } from "./library-store.js";
 import { buildPipgmServer } from "./server.js";
 import { ffmpegAudioNormaliser } from "./audio-upload.js";
+import { parseLocalAudioDevices } from "./local-audio.js";
 import { createEncoderSelector, type EncoderSetting } from "./encoder.js";
 
 /** Starts the PiPGM HTTP API. Reads PIPGM_PORT (default 3200), PIPGM_HOST (default 127.0.0.1) and PIPGM_API_KEY. */
@@ -49,10 +50,10 @@ async function main(): Promise<void> {
     ? new LibraryPersistence(blobStore, process.env.PIPGM_STORAGE_PREFIX?.trim() || "piprogram/library")
     : undefined;
   const ffmpegBin = process.env.PIPGM_FFMPEG?.trim() || undefined;
-  // One probe of `ffmpeg -encoders` at start (auto, Linux only); the result is kept for the process.
-  const encoderSelector = rtspBase
-    ? await createEncoderSelector({ setting: encoder, ffmpeg: ffmpegBin, fallbackEnabled: fallbackEnv !== "off" })
-    : undefined;
+  // Publishing is switched at runtime (PUT /api/v1/pipgm/publish); PIPGM_PUBLISH_RTSP_BASE and PIPGM_PUBLISH_AUDIO only
+  // seed the first start. The probe of `ffmpeg -encoders` (auto, Linux only) runs when publishing is first switched on.
+  const encoderProvider = () => createEncoderSelector({ setting: encoder, ffmpeg: ffmpegBin, fallbackEnabled: fallbackEnv !== "off" });
+  const localDevices = parseLocalAudioDevices(process.env.PIPGM_LOCAL_AUDIO_DEVICES);
   const app = buildPipgmServer({
     ...(libraryStore ? { libraryStore } : {}),
     ...(blobStore ? { stepStore: blobStore, playlistStore: blobStore } : {}),
@@ -63,19 +64,19 @@ async function main(): Promise<void> {
       ? {}
       : { audioNormaliser: ffmpegAudioNormaliser({ ffmpeg: ffmpegBin ?? "ffmpeg", ffprobe: process.env.PIPGM_FFPROBE?.trim() || "ffprobe" }) }),
     cacheDir,
-    ...(rtspBase && encoderSelector
-      ? {
-          publish: {
-            rtspBase,
-            ...(process.env.PIPGM_FFMPEG?.trim() ? { ffmpeg: process.env.PIPGM_FFMPEG.trim() } : {}),
-            encoder: encoderSelector,
-            idleStopSeconds,
-            feedInput,
-            ...(publishAudio ? { audio: true } : {}),
-            ...(fps ? { fps } : {})
-          }
-        }
-      : {})
+    publish: {
+      ...(rtspBase ? { rtspBase } : {}),
+      ...(ffmpegBin ? { ffmpeg: ffmpegBin } : {}),
+      encoder: encoderProvider,
+      idleStopSeconds,
+      feedInput,
+      ...(publishAudio ? { audio: true } : {}),
+      ...(fps ? { fps } : {})
+    },
+    localAudio: {
+      devices: localDevices,
+      ...(process.env.PIPGM_LOCAL_AUDIO_APLAY?.trim() ? { aplay: process.env.PIPGM_LOCAL_AUDIO_APLAY.trim() } : {})
+    }
   });
   const shutdown = (): void => {
     void app.close().finally(() => process.exit(0));
