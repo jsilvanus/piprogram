@@ -1424,6 +1424,63 @@ paths:
           description: Unknown item
         "422":
           description: Invalid useAt
+  /api/v1/pipgm/items/{itemId}/used-on:
+    post:
+      operationId: addItemUsedOn
+      tags: [Items]
+      summary: >-
+        Record a day the item was used (YYYY-MM-DD). An item can have several; a day already recorded is kept once.
+        Hymns are never cleaned up after use.
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties:
+                date: { type: string, example: "2026-11-08" }
+      responses:
+        "200":
+          description: The item, with its usedOn list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          description: Unknown item
+        "422":
+          description: Not a real day
+  /api/v1/pipgm/items/{itemId}/used-on/{date}:
+    delete:
+      operationId: removeItemUsedOn
+      tags: [Items]
+      summary: Take one recorded use day off an item.
+      parameters:
+        - in: path
+          name: itemId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: date
+          required: true
+          schema: { type: string, example: "2026-11-08" }
+      responses:
+        "200":
+          description: The item, with its usedOn list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          description: Unknown item
+        "422":
+          description: Not a real day
   /api/v1/pipgm/items/{itemId}/canva/export-package:
     post:
       operationId: uploadCanvaExportPackage

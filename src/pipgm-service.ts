@@ -2,6 +2,7 @@ import { formatHymnNumber, sameHymnNumber } from "./hymnals.js";
 import { AudioUploadError, type AudioNormaliser } from "./audio-upload.js";
 import { normalizeLibraryType } from "./library-query.js";
 import { DEFAULT_TIMEZONE, parseUseAt, UseAtError, useAtIntervals } from "./use-at.js";
+import { addUsedOn, parseUsedOnDate, removeUsedOn } from "./used-on.js";
 import { PiSwitchClient, type SlideAdvanceResult } from "./piswitch-client.js";
 import { renderPiPgmStageHtml } from "./stage-html.js";
 import type { PipgmFrameRenderer } from "./frame.js";
@@ -608,6 +609,29 @@ export class PiPgmService {
     return structuredClone(item);
   }
 
+  /**
+   * Records a day the item was used (an item can have several). Adding a day that is already there is a no-op.
+   * Throws UsedOnError for a value that is not a day. Returns the item or "ITEM_NOT_FOUND".
+   */
+  addUsedOn(itemId: string, date: unknown): PiPgmItem | "ITEM_NOT_FOUND" {
+    const item = this.library.get(itemId);
+    if (!item) return "ITEM_NOT_FOUND";
+    item.usedOn = addUsedOn(item.usedOn, parseUsedOnDate(date));
+    this.persistItem(itemId, this.assetIdsOf(item), this.expiryOf(item), this.savedItems.has(itemId));
+    return structuredClone(item);
+  }
+
+  /** Removes one recorded day from an item. Returns the item or "ITEM_NOT_FOUND". */
+  removeUsedOn(itemId: string, date: unknown): PiPgmItem | "ITEM_NOT_FOUND" {
+    const item = this.library.get(itemId);
+    if (!item) return "ITEM_NOT_FOUND";
+    const next = removeUsedOn(item.usedOn, parseUsedOnDate(date));
+    if (next.length > 0) item.usedOn = next;
+    else delete item.usedOn;
+    this.persistItem(itemId, this.assetIdsOf(item), this.expiryOf(item), this.savedItems.has(itemId));
+    return structuredClone(item);
+  }
+
   /** Today's date (YYYY-MM-DD) in the configured time zone. */
   todayInZone(): string {
     return new Intl.DateTimeFormat("sv-SE", { timeZone: USE_AT_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(this.now()));
@@ -662,6 +686,7 @@ export class PiPgmService {
 
   /** The retention deadline an item's files carry in the store (Canva pages only). */
   private expiryOf(item: PiPgmItem): string | undefined {
+    // Hymns are never cleaned up after use, whatever the retention setting says.
     if (item.kind !== "canva" || this.canvaRetentionDays <= 0) return undefined;
     return new Date(this.now() + this.canvaRetentionDays * 86_400_000).toISOString();
   }
