@@ -489,6 +489,8 @@ export interface PipgmFeedersOptions {
 }
 
 const FEED_IDS: PiPgmPipelineId[] = ["PiPGM1", "PiPGM2", "PiPGM3"];
+/** The Pi's V4L2 H.264 encoder takes two encodes at once; a third feed starts on libx264. */
+const HARDWARE_FEEDS = 2;
 
 /** What changes the picture of a pipeline. Anything else (volume, playlist edits) does not. */
 export function pictureKey(snapshot: PiPgmPipelineSnapshot): string {
@@ -529,6 +531,12 @@ export class PipgmFeeders {
   /** Feeds that are published. Others are left alone: no ffmpeg, no stream. Default all three. */
   private active: Set<PiPgmPipelineId>;
   private lastStartAt = 0;
+  /** Feeds holding one of the hardware encoder slots. Released when the feed is stopped on purpose. */
+  private readonly hardwareFeeds = new Set<PiPgmPipelineId>();
+  /** Early h264_v4l2m2m failures per feed; the first one is retried on the hardware encoder. */
+  private readonly earlyFailures = new Map<PiPgmPipelineId, number>();
+  /** Feeds that fell back to libx264 for good. */
+  private readonly softwareFeeds = new Set<PiPgmPipelineId>();
 
   constructor(private readonly options: PipgmFeedersOptions) {
     this.active = new Set(options.feeds ?? FEED_IDS);
@@ -543,8 +551,8 @@ export class PipgmFeeders {
           audio: this.sound.get(id),
           rtspUrl: `${options.rtspBase.replace(/\/$/, "")}/${id}`,
           ffmpeg: options.ffmpeg,
-          encoder: () => this.selector.current,
-          onEarlyExit: (reason) => this.encoderFailed(reason),
+          encoder: () => this.encoderFor(id),
+          onEarlyExit: (reason) => this.feedEncoderFailed(id, reason),
           fps: options.fps,
           input: options.feedInput,
           convert: options.convert,
@@ -565,19 +573,35 @@ export class PipgmFeeders {
     );
   }
 
-  /** The encoder in use and whether a fallback happened. */
+  /** The encoder in use and whether a feed fell back to libx264. */
   encoderInfo(): { encoder: FeederEncoder; fallback: boolean; idleStopSeconds: number } {
     return {
       encoder: this.selector.current,
-      fallback: this.selector.fallenBack,
+      fallback: this.softwareFeeds.size > 0,
       idleStopSeconds: this.options.idleStopSeconds ?? 0
     };
   }
 
-  private encoderFailed(reason: string): void {
-    if (!this.selector.noteEarlyFailure()) return;
-    this.options.onFallback?.(`h264_v4l2m2m failed within its first seconds (${reason}); using libx264 from now on`);
-    for (const feeder of this.feeders.values()) feeder.restartProcess();
+  /** The encoder a feed starts with: hardware while it holds one of the two slots, libx264 otherwise. */
+  private encoderFor(id: PiPgmPipelineId): FeederEncoder {
+    if (this.selector.current === "libx264" || !this.selector.canFallBack) return this.selector.current;
+    if (this.softwareFeeds.has(id)) return "libx264";
+    if (this.hardwareFeeds.has(id)) return "h264_v4l2m2m";
+    if (this.hardwareFeeds.size >= HARDWARE_FEEDS) return "libx264";
+    this.hardwareFeeds.add(id);
+    return "h264_v4l2m2m";
+  }
+
+  /** One early exit of a feed's hardware encoder: retried once, then this feed alone uses libx264. */
+  private feedEncoderFailed(id: PiPgmPipelineId, reason: string): void {
+    if (!this.selector.canFallBack) return;
+    const failures = (this.earlyFailures.get(id) ?? 0) + 1;
+    this.earlyFailures.set(id, failures);
+    if (failures < 2) return;
+    this.softwareFeeds.add(id);
+    this.hardwareFeeds.delete(id);
+    this.options.onFallback?.(`${id}: h264_v4l2m2m failed twice within its first seconds (${reason}); this feed uses libx264`);
+    this.feeders.get(id)!.restartProcess();
   }
 
   /** Publishes exactly these feeds. A feed that is switched off stops its ffmpeg at once; the others are not touched. */
@@ -586,6 +610,7 @@ export class PipgmFeeders {
     for (const id of FEED_IDS) {
       if (this.active.has(id) && !next.has(id)) {
         this.feeders.get(id)!.stop();
+        this.hardwareFeeds.delete(id);
         this.shown.delete(id);
         this.idleSince.delete(id);
         this.idleStopped.delete(id);
@@ -675,6 +700,7 @@ export class PipgmFeeders {
         this.idleSince.set(id, since);
         if (this.shown.has(id) && Date.now() - since >= idleMs) {
           this.feeders.get(id)!.stop();
+          this.hardwareFeeds.delete(id);
           this.idleStopped.add(id);
           this.shown.delete(id);
           return;
