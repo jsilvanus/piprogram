@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PublishController, type RunningFeeders } from "./publish-controller.js";
@@ -21,7 +21,7 @@ test("publishing is off by default, switched at runtime, validated and remembere
       new PublishController({ cacheDir: dir, defaults, create: async (c) => fakeFeeders(log, `${c.rtspBase}|${c.audio}`) });
     const first = make();
     await first.start();
-    assert.deepEqual(first.snapshot(), { enabled: false, rtspBase: null, audio: false, source: "default", running: false });
+    assert.deepEqual(first.snapshot(), { enabled: false, feeds: { PiPGM1: false, PiPGM2: false, PiPGM3: false }, rtspBase: null, audio: false, source: "default", running: false });
     assert.equal((await first.apply({ enabled: true })).ok, false, "needs an address");
     assert.equal((await first.apply({ rtspBase: "http://x" })).ok, false);
     assert.equal((await first.apply({ enabled: "yes" })).ok, false);
@@ -45,6 +45,44 @@ test("publishing is off by default, switched at runtime, validated and remembere
     const third = make({ rtspBase: "rtsp://other:1" });
     await third.start();
     assert.equal(third.snapshot().enabled, false, "stored off beats the env seed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("feeds are published one by one without disturbing the others", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pipgm-pub-feed-"));
+  try {
+    const log: string[] = [];
+    const created: string[][] = [];
+    const c = new PublishController({
+      cacheDir: dir,
+      create: async (x) => {
+        created.push([...x.feeds]);
+        return { ...fakeFeeders(log, "f"), setActive: (ids: string[]) => void log.push(`active ${ids.join(",")}`) };
+      }
+    });
+    await c.start();
+    assert.equal((await c.apply({ feeds: { PiPGM2: true } })).ok, false, "needs an address first");
+    assert.equal((await c.apply({ rtspBase: "rtsp://127.0.0.1:8554" })).ok, true);
+    assert.deepEqual(created, [], "an address alone starts nothing");
+    assert.equal((await c.apply({ feeds: { PiPGM9: true } })).ok, false);
+    assert.equal((await c.apply({ feeds: { PiPGM1: "yes" } })).ok, false);
+    await c.apply({ feeds: { PiPGM2: true } });
+    assert.deepEqual(created, [["PiPGM2"]]);
+    await c.apply({ feeds: { PiPGM3: true } });
+    assert.deepEqual(log, ["start f", "active PiPGM2,PiPGM3"], "no restart: the running feed is left alone");
+    assert.deepEqual(c.snapshot().feeds, { PiPGM1: false, PiPGM2: true, PiPGM3: true });
+    await c.apply({ feeds: { PiPGM2: false, PiPGM3: false } });
+    assert.equal(c.snapshot().enabled, false);
+    assert.equal(c.snapshot().running, false, "the last feed off stops the publisher");
+    await c.apply({ enabled: true });
+    assert.deepEqual(c.snapshot().feeds, { PiPGM1: true, PiPGM2: true, PiPGM3: true }, "enabled is the all-feeds switch");
+    await c.stop();
+    // Stored before per-feed switches existed: enabled meant all three.
+    await writeFile(join(dir, "publish-settings.json"), JSON.stringify({ enabled: true, rtspBase: "rtsp://127.0.0.1:8554", audio: false }));
+    const old = new PublishController({ cacheDir: dir, create: async () => fakeFeeders(log, "old") });
+    assert.deepEqual(old.snapshot().feeds, { PiPGM1: true, PiPGM2: true, PiPGM3: true });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

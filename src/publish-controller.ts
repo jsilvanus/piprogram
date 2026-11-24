@@ -6,8 +6,14 @@
  */
 import { RuntimeSettingsFile } from "./runtime-settings.js";
 
+export const FEED_IDS = ["PiPGM1", "PiPGM2", "PiPGM3"] as const;
+export type FeedId = (typeof FEED_IDS)[number];
+
 export interface PublishConfig {
+  /** True while at least one feed is published. `PUT {enabled}` switches all three at once. */
   enabled: boolean;
+  /** Each feed is published on its own. All off by default. */
+  feeds: Record<FeedId, boolean>;
   rtspBase: string | null;
   /** Feeds carry an AAC track (silent until a track is played on an armed feed). */
   audio: boolean;
@@ -16,6 +22,8 @@ export interface PublishConfig {
 export interface RunningFeeders {
   start(): void;
   stop(): void;
+  /** Publish exactly these feeds without touching the others. */
+  setActive?(ids: string[]): void;
   status(): Record<string, unknown>;
   encoderInfo(): Record<string, unknown>;
 }
@@ -24,7 +32,7 @@ export interface PublishControllerOptions {
   cacheDir?: string | undefined;
   /** Used only when no setting has been stored yet. */
   defaults?: { rtspBase?: string | undefined; audio?: boolean | undefined } | undefined;
-  create: (config: { rtspBase: string; audio: boolean }) => Promise<RunningFeeders>;
+  create: (config: { rtspBase: string; audio: boolean; feeds: FeedId[] }) => Promise<RunningFeeders>;
   onError?: ((message: string) => void) | undefined;
 }
 
@@ -46,23 +54,28 @@ export class PublishController {
     const envBase = options.defaults?.rtspBase?.trim() || null;
     if (stored && typeof stored.enabled === "boolean") {
       this.source = "stored";
+      const feeds = readFeeds(stored.feeds, stored.enabled);
       this.config = {
-        enabled: stored.enabled,
+        enabled: FEED_IDS.some((id) => feeds[id]),
+        feeds,
         rtspBase: typeof stored.rtspBase === "string" && RTSP_BASE.test(stored.rtspBase) ? stored.rtspBase : envBase,
         audio: stored.audio === true
       };
     } else if (envBase && RTSP_BASE.test(envBase)) {
       this.source = "env";
-      this.config = { enabled: true, rtspBase: envBase, audio: options.defaults?.audio === true };
+      this.config = { enabled: true, feeds: allFeeds(true), rtspBase: envBase, audio: options.defaults?.audio === true };
     } else {
       this.source = "default";
-      this.config = { enabled: false, rtspBase: null, audio: false };
+      this.config = { enabled: false, feeds: allFeeds(false), rtspBase: null, audio: false };
     }
-    if (this.config.enabled && !this.config.rtspBase) this.config.enabled = false;
+    if (!this.config.rtspBase) {
+      this.config.feeds = allFeeds(false);
+      this.config.enabled = false;
+    }
   }
 
   snapshot(): PublishConfig & { source: string; running: boolean } {
-    return { ...this.config, source: this.source, running: this.feeders !== null };
+    return { ...this.config, feeds: { ...this.config.feeds }, source: this.source, running: this.feeders !== null };
   }
 
   /** The running feeders (null while publishing is off). */
@@ -80,10 +93,19 @@ export class PublishController {
   }
 
   /** Applies a change: validates, stores it, and starts, restarts or stops the feeders. */
-  async apply(patch: { enabled?: unknown; rtspBase?: unknown; audio?: unknown }): Promise<PublishPatchResult> {
+  async apply(patch: { enabled?: unknown; feeds?: unknown; rtspBase?: unknown; audio?: unknown }): Promise<PublishPatchResult> {
     return this.serialize(async () => {
       if (patch.enabled !== undefined && typeof patch.enabled !== "boolean") return { ok: false, code: "INVALID_ENABLED", message: "enabled must be a boolean" } as const;
       if (patch.audio !== undefined && typeof patch.audio !== "boolean") return { ok: false, code: "INVALID_AUDIO", message: "audio must be a boolean" } as const;
+      let feeds = { ...this.config.feeds };
+      if (patch.feeds !== undefined) {
+        const f = patch.feeds as Record<string, unknown> | null;
+        if (!f || typeof f !== "object" || Array.isArray(f)) return { ok: false, code: "INVALID_FEEDS", message: "feeds must be an object like {\"PiPGM2\": true}" } as const;
+        for (const [key, value] of Object.entries(f)) {
+          if (!(FEED_IDS as readonly string[]).includes(key)) return { ok: false, code: "INVALID_FEEDS", message: `unknown feed ${key}; use ${FEED_IDS.join(", ")}` } as const;
+          if (typeof value !== "boolean") return { ok: false, code: "INVALID_FEEDS", message: `feeds.${key} must be a boolean` } as const;
+        }
+      }
       let rtspBase = this.config.rtspBase;
       if (patch.rtspBase !== undefined) {
         if (typeof patch.rtspBase !== "string" || !RTSP_BASE.test(patch.rtspBase.trim())) {
@@ -91,19 +113,25 @@ export class PublishController {
         }
         rtspBase = patch.rtspBase.trim().replace(/\/+$/, "");
       }
+      // `enabled` is the all-feeds switch; `feeds` then adjusts single feeds.
+      if (typeof patch.enabled === "boolean") feeds = allFeeds(patch.enabled);
+      if (patch.feeds !== undefined) Object.assign(feeds, patch.feeds as Record<string, boolean>);
       const next: PublishConfig = {
-        enabled: patch.enabled ?? this.config.enabled,
+        enabled: FEED_IDS.some((id) => feeds[id]),
+        feeds,
         rtspBase,
         audio: patch.audio ?? this.config.audio
       };
       if (next.enabled && !next.rtspBase) {
         return { ok: false, code: "RTSP_BASE_REQUIRED", message: "give rtspBase (for example rtsp://127.0.0.1:8554) to enable publishing" } as const;
       }
-      const changed = next.enabled !== this.config.enabled || next.rtspBase !== this.config.rtspBase || next.audio !== this.config.audio;
+      const restart = next.rtspBase !== this.config.rtspBase || next.audio !== this.config.audio;
+      const feedsChanged = FEED_IDS.some((id) => next.feeds[id] !== this.config.feeds[id]);
       this.config = next;
       this.source = "stored";
       this.file.write(next);
-      if (changed || (next.enabled && !this.feeders)) await this.reconcile(true);
+      if (restart) await this.reconcile(true);
+      else if (feedsChanged || (next.enabled && !this.feeders)) await this.reconcile(false);
       return { ok: true, config: { ...this.config } } as const;
     });
   }
@@ -120,9 +148,18 @@ export class PublishController {
       this.halt();
       return;
     }
-    if (this.feeders) return;
+    const wanted = FEED_IDS.filter((id) => this.config.feeds[id]);
+    if (this.feeders) {
+      // Already running: switch single feeds without touching the others.
+      if (this.feeders.setActive) this.feeders.setActive(wanted);
+      else {
+        this.halt();
+        return this.reconcile(false);
+      }
+      return;
+    }
     try {
-      const feeders = await this.options.create({ rtspBase: this.config.rtspBase, audio: this.config.audio });
+      const feeders = await this.options.create({ rtspBase: this.config.rtspBase, audio: this.config.audio, feeds: wanted });
       feeders.start();
       this.feeders = feeders;
     } catch (error) {
@@ -135,4 +172,15 @@ export class PublishController {
     this.chain = run.catch(() => undefined);
     return run;
   }
+}
+
+function allFeeds(on: boolean): Record<FeedId, boolean> {
+  return { PiPGM1: on, PiPGM2: on, PiPGM3: on };
+}
+
+/** Stored settings from before per-feed publishing have only `enabled`: that meant all three feeds. */
+function readFeeds(stored: unknown, enabled: boolean): Record<FeedId, boolean> {
+  if (!stored || typeof stored !== "object") return allFeeds(enabled);
+  const f = stored as Record<string, unknown>;
+  return { PiPGM1: f.PiPGM1 === true, PiPGM2: f.PiPGM2 === true, PiPGM3: f.PiPGM3 === true };
 }

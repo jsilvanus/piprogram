@@ -32,7 +32,7 @@ const USAGE = `Usage: piprogram <command>
   tts prepare <text> [--voice name]   (render a phrase to a WAV ahead of time; prints the audio item id)
   audio kill   (silence and disarm every pipeline)
   audio levels (volumes behind whisper, normal, loud, shout)
-  publish [status|on <rtspBase>|off|audio on|off]   (publish PiPGM1-3 to MediaMTX; runtime setting)
+  publish [status|on <rtspBase>|off|audio on|off|feed <id> on|off]   (publish PiPGM1-3 to MediaMTX; runtime setting)
   local-audio [status|on|off|device <hdmi0|hdmi1> <alsa-device|none>]
   speak <itemId> [--level whisper|normal|loud|shout | --volume n] [--dry-run]
   speak stop
@@ -259,7 +259,12 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         io.out(`feed sound ${rest[0]}`);
         return 0;
       }
-      throw new Error("usage: publish [status|on <rtspBase>|off|audio on|off]");
+      if (sub === "feed" && /^PiPGM[123]$/.test(rest[0] ?? "") && (rest[1] === "on" || rest[1] === "off")) {
+        await PipelinesService.setPublish({ feeds: { [rest[0] as string]: rest[1] === "on" } } as never);
+        io.out(`${rest[0]} publishing ${rest[1]}`);
+        return 0;
+      }
+      throw new Error("usage: publish [status|on <rtspBase>|off|audio on|off|feed <PiPGM1-3> on|off]");
     }
     if (group === "local-audio") {
       const sub = action ?? "status";

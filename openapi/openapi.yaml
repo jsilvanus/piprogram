@@ -1840,7 +1840,14 @@ components:
     PublishSettings:
       type: object
       properties:
-        enabled: {type: boolean}
+        enabled: {type: boolean, description: "True while at least one feed publishes. PUT {enabled} switches all three at once."}
+        feeds:
+          type: object
+          description: Each feed publishes on its own (PUT {feeds:{PiPGM2:true}} touches only that one). All off by default.
+          properties:
+            PiPGM1: {type: boolean}
+            PiPGM2: {type: boolean}
+            PiPGM3: {type: boolean}
         rtspBase: {type: string, nullable: true}
         audio: {type: boolean}
         source: {type: string, enum: [stored, env, default]}
